@@ -1,0 +1,133 @@
+use super::{
+    tokenizer::{Token::*, *},
+    AutomataBuilder, SubNFA, StrEdge, RangeEdge, EpsEdge,
+    StatePtr, State
+};
+use kiam::when;
+
+grammar<'input>(nfa: &mut AutomataBuilder<'input>);
+
+pub Lexer: SubNFA = {
+    "lexer" <decls:LexDecl*> "lexer_end" => {
+        let start = nfa.add_state(State::casual());
+        let end = nfa.add_state(State::terminal());
+
+        decls.iter()
+            .filter_map(|(is_tok, sub)| when! {
+                *is_tok => Some(sub),
+                _ => None,
+            })
+            .for_each(|sub| {
+                nfa.add_sym(&start, EpsEdge, sub.input());
+                nfa.add_sym(sub.output(), EpsEdge, &end);
+            });
+        SubNFA(start, end)
+    }
+}
+
+LexDecl: (bool, SubNFA) = {
+    <tok:("tok"?)> <id:Id> "=" <curr:LexSeq> ";" => {
+        nfa.assign_to_id(id, SubNFA::clone(&curr));
+        (tok.is_some(), curr)
+    }
+}
+
+LexSeq: SubNFA = {
+    <seq:LexPrimQual+> => {
+        let input = StatePtr::clone(seq[0].input());
+        let mut prev_to = seq[0].output();
+        for SubNFA(from, to) in seq[1..].iter() {
+            prev_to.extend(from);
+            prev_to = to;
+        }
+        SubNFA(input, StatePtr::clone(prev_to))
+    },
+}
+
+LexAlt: SubNFA = {
+    "{" <fst:LexSeq> <rest:("," <LexSeq>)*> "}" => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), EpsEdge, fst.input());
+        nfa.add_sym(fst.output(), EpsEdge, curr.output());
+
+        for sub in rest.iter() {
+            nfa.add_sym(curr.input(), EpsEdge, sub.input());
+            nfa.add_sym(sub.output(), EpsEdge, curr.output());
+        }
+        curr
+    }
+}
+
+LexPrimQual: SubNFA = {
+    LexPrim,
+    <curr:LexPrim> "?" => {
+        nfa.add_sym(curr.input(), EpsEdge, curr.output());
+        curr
+    },
+    <sub:LexPrim> "+" => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), EpsEdge, sub.input());
+        nfa.add_sym(sub.output(), EpsEdge, curr.output());
+        nfa.add_sym(sub.output(), EpsEdge, sub.input());
+        curr
+    },
+    <sub:LexPrim> "*" => {
+        let curr = nfa.create_sub();
+        // parse "+"
+        nfa.add_sym(curr.input(), EpsEdge, sub.input());
+        nfa.add_sym(sub.output(), EpsEdge, curr.output());
+        nfa.add_sym(sub.output(), EpsEdge, sub.input());
+        // and also eps
+        nfa.add_sym(curr.input(), EpsEdge, curr.output());
+        curr
+    },
+}
+
+LexPrim: SubNFA = {
+    Id => nfa.resolve_id(<>),
+    LexAlt,
+    Str => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), StrEdge(<>), curr.output());
+        curr
+    },
+    <rng:Rng> => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), RangeEdge::new(rng.0, rng.1), curr.output());
+        curr
+    },
+    "eps" => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), EpsEdge, curr.output());
+        curr
+    }
+}
+
+extern {
+    type Location = usize;
+    type Error = Error<'input>;
+
+    enum Token<'input>
+    {
+        "lexer"       => LexerBegin,
+        "lexer_end"   => LexerEnd,
+        "tok"         => Tok,
+        Id            => Id(<&'input str>),
+        "{"           => LBrace,
+        "}"           => RBrace,
+        Rng           => Range(<char>, <char>),
+        Str           => Str(<String>),
+        "="           => Eq,
+        "?"           => QuestionMark,
+        "*"           => Star,
+        "+"           => Plus,
+        ","           => Comma,
+        ";"           => Semicolon,
+        "eps"         => Eps,
+
+        "grammar"     => GrammarBegin,
+        "grammar_end" => GrammarEnd,
+        Action        => FatArrow(<&'input str>),
+        ":"           => Colon,
+    }
+}
