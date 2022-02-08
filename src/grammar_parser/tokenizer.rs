@@ -4,6 +4,7 @@ use combine::{
     Parser,
     choice, EasyParser, many, none_of, many1, not_followed_by, attempt, between,
 };
+use crate::grammar_parser::GrammarError;
 
 use crate::util;
 
@@ -13,9 +14,9 @@ pub struct Error<'input>
     pub unparsed: &'input str,
 }
 
-fn error<T>(unparsed: &str) -> Result<T, Error>
+fn error<T>(unparsed: &str) -> Result<T, GrammarError>
 {
-    Err(Error { unparsed })
+    Err(GrammarError::Tokenize(Error { unparsed }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,7 +58,7 @@ impl<'input> Lexer<'input>
 
 pub type Spanned<Tok, Loc, Err> = Result<(Loc, Tok, Loc), Err>;
 
-pub type MbToken<'input> = Spanned<Token<'input>, usize, Error<'input>>;
+pub type MbToken<'input> = Spanned<Token<'input>, usize, GrammarError<'input>>;
 
 impl<'input> Iterator for Lexer<'input>
 {

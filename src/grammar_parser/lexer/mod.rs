@@ -8,15 +8,16 @@ use std::{
     collections::{HashSet, HashMap},
     cell::{RefCell}
 };
-
+use crate::UnitId;
 use self::{alphabet::Alphabet};
-pub use self::symbol::{Symbol, RangeEdge, StrEdge, EpsEdge, Transition};
-pub use thompson::{thompson, DFA, dfaBASEDlexer as DFALexer};
+
+pub use self::symbol::{Symbol, RangeEdge, StrEdge, EpsEdge, UnresolvedName, Transition};
+pub use thompson::{thompson, DFA, DFABasedLexer as DFALexer, Conflict};
 
 #[derive(Debug)]
 pub struct State
 {
-    is_term: bool,
+    tok_id: Option<UnitId>, // Some(id) means that it's terminal state for token with 'id'
     edges: RefCell<Vec<Edge>>,
 }
 
@@ -25,11 +26,11 @@ impl State
     pub fn casual() -> Self
     { State::default() }
 
-    pub fn terminal() -> Self
-    { State{ is_term: true, ..State::default() } }
+    pub fn terminal(id: UnitId) -> Self
+    { State{ tok_id: Some(id), ..State::default() } }
 
-    pub fn with_flag(is_term: bool) -> Self
-    { State{ is_term, ..State::default() } }
+    pub fn with_flag(tok_id: Option<UnitId>) -> Self
+    { State{ tok_id, ..State::default() } }
 
     pub fn extend(&self, from: &State)
     {
@@ -42,7 +43,7 @@ impl State
 impl Default for State
 {
     fn default() -> Self
-    { State{ is_term: false, edges: RefCell::new(vec![]) } }
+    { State{ tok_id: None, edges: RefCell::new(vec![]) } }
 }
 
 
@@ -147,16 +148,24 @@ impl SubNFA
 
     pub fn output(&self) -> &StatePtr
     { &self.1 }
+
+}
+
+#[derive(Debug)]
+enum NamedNFA
+{
+    Defined(SubNFA),
+    UndefinedQueue(Vec<SubNFA>),
 }
 
 #[derive(Debug, Default)]
-pub struct AutomataBuilder<'input>
+pub struct AutomataBuilder
 {
-    named_nfas: HashMap<&'input str, SubNFA>,
+    named_nfas: HashMap<String, NamedNFA>,
     pub nfa: Automata,
 }
 
-impl<'input> AutomataBuilder<'input>
+impl AutomataBuilder
 {
     pub fn new() -> Self
     { AutomataBuilder::default() }
@@ -180,57 +189,130 @@ impl<'input> AutomataBuilder<'input>
         self.nfa.add_through_sym(StatePtr::clone(from), sym, StatePtr::clone(to));
     }
 
-    pub fn resolve_id(&mut self, id: &'input str) -> SubNFA
+    pub fn resolve_id(&mut self, id: &str) -> SubNFA
     {
-        match self.named_nfas.get(id) {
-            Some(found) => SubNFA::clone(found),
-            None => {
-                let created = self.create_sub();
-                self.named_nfas.insert(id, SubNFA::clone(&created));
-                created
-            }
-        }
+        let res = self.create_sub();
+        self.resolve_id_for_sub(id, res)
     }
 
-    pub fn assign_to_id(&mut self, id: &'input str, sub: SubNFA) -> SubNFA
+    fn resolve_id_for_sub(&mut self, id: &str, decl_ref: SubNFA) -> SubNFA
     {
-        match self.named_nfas.get(id) {
-            Some(SubNFA(f_in, f_out)) => {
-                // we want found input to have edges to every state that sub.from has to
-                f_in.extend(sub.input());
+        use NamedNFA::*;
 
-                // and we want every state that has edge to sub.to to have edge to found output
-                let edges_to = sub.output().edges.borrow();
-                for Edge{ from: e_from, through: sym, .. } in edges_to.iter() {
-                    let from = Weak::upgrade(e_from).unwrap();
-                    let new_edge = Edge{
-                        from: Weak::clone(e_from),
-                        through: Rc::clone(sym),
-                        to: StatePtr::clone(f_out)
-                    };
-                    from.edges.borrow_mut().push(new_edge);
-                }
-                SubNFA(StatePtr::clone(f_in), StatePtr::clone(f_out))
+        let named_nfa = self.named_nfas.entry(id.into())
+            .or_insert_with(|| UndefinedQueue(vec![]));
+
+        match named_nfa {
+            Defined(definition) => {
+                let definition = SubNFA::clone(definition);
+                let def_clone = self.deep_clone(&definition);
+                self.add_sym(decl_ref.input(), EpsEdge, def_clone.input());
+                self.add_sym(def_clone.output(), EpsEdge, decl_ref.output());
             },
-            None => {
-                self.named_nfas.insert(id, SubNFA::clone(&sub));
-                sub
+            UndefinedQueue(queue) => {
+                queue.push(SubNFA::clone(&decl_ref));
+
+                if decl_ref.input().edges.borrow().is_empty() {
+                    self.add_sym(decl_ref.input(), UnresolvedName(id.into()), decl_ref.output());
+                }
+                assert_eq!(decl_ref.input().edges.borrow().len(), 1);
             }
         }
+        decl_ref
     }
 
-    pub fn build(self, self_sub: SubNFA) -> DFA
-    { thompson(self.nfa, self_sub) }
+    pub fn define_name(&mut self, id: &str, definition: SubNFA) -> SubNFA
+    {
+        use NamedNFA::*;
+
+        let mut queue = match self.named_nfas.insert(id.into(), Defined(SubNFA::clone(&definition))) {
+            Some(Defined(_)) => panic!("Conflicting definitions of {}", id),
+            Some(UndefinedQueue(queue)) => queue,
+            None => vec![],
+        };
+
+        let res = self.create_sub();
+        queue.push(SubNFA::clone(&res));
+
+        for decl_ref in queue.into_iter() {
+            // it may have a single UndefinedName edge, which now will be deleted
+            assert!(decl_ref.input().edges.borrow().len() <= 1,
+                "name: {}, len: {}", id, decl_ref.input().edges.borrow().len());
+            decl_ref.input().edges.borrow_mut().clear();
+
+            let def_clone = self.deep_clone(&definition);
+
+            self.add_sym(decl_ref.input(), EpsEdge, def_clone.input());
+            self.add_sym(def_clone.output(), EpsEdge, decl_ref.output());
+        }
+        res
+    }
+
+    pub fn build(self, start: StatePtr) -> Result<DFA, Conflict>
+    {
+        self.named_nfas
+            .iter()
+            .for_each(|(name, mb_def)| match mb_def {
+                NamedNFA::UndefinedQueue(_) => panic!("undefined symbol: {}", name),
+                _ => ()
+            });
+        thompson(self.nfa, start)
+    }
 
     pub fn states_cnt(&self) -> usize
     { self.nfa.states.len() }
+
+    fn deep_clone(&mut self, orig: &SubNFA) -> SubNFA
+    {
+        let mut mapping = HashMap::new();
+        let SubNFA(orig_in, orig_out) = orig;
+        let (res_in, _) = self.map_to_new(&mut mapping, orig_in);
+        let (res_out, _) = self.map_to_new(&mut mapping, orig_out);
+
+        let mut to_copy = vec![StatePtr::clone(&orig_in)];
+
+        while let Some(src_from) = to_copy.pop() {
+            let (dst_from, _) = self.map_to_new(&mut mapping, &src_from);
+            let edges = src_from.edges.borrow();
+            for Edge{ through, to: src_to, .. } in edges.iter() {
+                let (dst_to, marked) = self.map_to_new(&mut mapping, src_to);
+                if !marked {
+                    to_copy.push(StatePtr::clone(src_to));
+                }
+
+                match through.deref() {
+                    Symbol::Unresolved(UnresolvedName(name)) => {
+                        self.resolve_id_for_sub(&name, SubNFA(StatePtr::clone(&dst_from), StatePtr::clone(&dst_to)));
+                    }
+                    _ => self.nfa.add_edge(Edge{
+                            from: Rc::downgrade(&dst_from),
+                            through: Rc::clone(through),
+                            to: dst_to
+                        }),
+                }
+            }
+        }
+        SubNFA(res_in, res_out)
+    }
+
+    fn map_to_new(&mut self, mapping: &mut HashMap<StatePtr, StatePtr>, from: &StatePtr) -> (StatePtr, bool)
+    {
+        match mapping.get(from) {
+            Some(to) => (StatePtr::clone(to), true),
+            None => {
+                let res = self.add_casual();
+                mapping.insert(StatePtr::clone(from), StatePtr::clone(&res));
+                (res, false)
+            }
+        }
+    }
 }
 
 
 #[cfg(test)]
 mod tests
 {
-    use crate::{LexerParser, Lexer};
+    use crate::{LexerParser, Lexer, Registry};
 
     use super::*;
 
@@ -238,11 +320,12 @@ mod tests
     {
         let lexer_parser = LexerParser::new();
         let mut nfa = AutomataBuilder::new();
+        let mut reg = Registry::new();
 
-        let dfa = lexer_parser.parse(&mut nfa, Lexer::new(&input))
-            .map(|sub_nfa| nfa.build(sub_nfa))
+        let dfa = lexer_parser.parse(&mut nfa, &mut reg, Lexer::new(&input))
+            .map(|start| nfa.build(start))
             .expect("Couldn't parse grammar");
-        dfa
+        dfa.unwrap_or_else(|Conflict(f, s)| panic!("Conflicting states: {:?}, {:?}", f, s))
     }
 
     #[test]
@@ -278,7 +361,9 @@ mod tests
             "int", "kek18", "=", "84", ";",
             "bool", "false", "=", "True", ";"];
 
-        DFALexer::new(&dfa, &input).zip(expected.into_iter().map(Ok))
+        DFALexer::new(&dfa, &input)
+            .map(|mb_tok| mb_tok.map(|(s, _tok_id)| s))
+            .zip(expected.into_iter().map(Ok))
             .for_each(|(my_tok, expected)| assert_eq!(my_tok, expected));
     }
 
@@ -304,7 +389,9 @@ mod tests
         let input = "lexer_end lexer booo";
         let expected = [Ok("lexer_end"), Ok("lexer"), Ok("boo"), Err("o")];
 
-        DFALexer::new(&dfa, &input).zip(expected)
+        DFALexer::new(&dfa, &input)
+            .map(|mb_tok| mb_tok.map(|(s, _tok_id)| s))
+            .zip(expected)
             .for_each(|(my_tok, expected)| assert_eq!(my_tok, expected));
     }
 }

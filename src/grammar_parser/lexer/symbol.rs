@@ -1,14 +1,15 @@
-use std::{hash::Hash, cmp::Ordering};
+use std::{hash::Hash, cmp::Ordering, fmt::{Debug, Write}};
 
 use kiam::when;
 
 /// "Metaphorical" symbol: a transition in an automata
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash)]
 pub enum Symbol
 {
     Range(RangeEdge),
     Str(StrEdge),
     Eps(EpsEdge),
+    Unresolved(UnresolvedName),
 }
 
 impl Symbol
@@ -20,6 +21,7 @@ impl Symbol
             Str(_) => 0,
             Range(_) => 1,
             Eps(_) => 2,
+            Unresolved(_) => 3,
         }
     }
 }
@@ -34,6 +36,12 @@ impl From<StrEdge> for Symbol
 {
     fn from(str: StrEdge) -> Symbol
     { Symbol::Str(str) }
+}
+
+impl From<UnresolvedName> for Symbol
+{
+    fn from(name: UnresolvedName) -> Symbol
+    { Symbol::Unresolved(name) }
 }
 
 impl Ord for Symbol
@@ -90,7 +98,9 @@ pub enum TransitError
 
 pub trait Transition
 {
-    fn try_pass<It>(&self, it: &mut It) -> Result<usize, TransitError>
+    type OkRes;
+
+    fn try_pass<It>(&self, it: &mut It) -> Result<Self::OkRes, TransitError>
         where It: Iterator<Item = char> + Clone;
 
     fn is_eps(&self) -> bool
@@ -99,14 +109,16 @@ pub trait Transition
 
 impl Transition for Symbol
 {
+    type OkRes = usize;
+
     fn try_pass<It>(&self, it: &mut It) -> Result<usize, TransitError>
         where It: Iterator<Item = char> + Clone
     {
         match self {
             Symbol::Range(rng) => rng.try_pass(it),
             Symbol::Str(str) => str.try_pass(it),
-            // Symbol::Choice(choice) => choice.try_pass(it),
             Symbol::Eps(eps) => eps.try_pass(it),
+            Symbol::Unresolved(unresolved) => unresolved.try_pass(it),
         }
     }
 
@@ -115,8 +127,27 @@ impl Transition for Symbol
         match self {
             Symbol::Range(rng) => rng.is_eps(),
             Symbol::Str(str) => str.is_eps(),
-            // Symbol::Choice(choice) => choice.is_eps(),
             Symbol::Eps(eps) => eps.is_eps(),
+            Symbol::Unresolved(unresolved) => unresolved.is_eps(),
+        }
+    }
+}
+
+impl Debug for Symbol
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    {
+        match self {
+            Self::Range(RangeEdge(from, to)) => f.write_char('[')
+                .and_then(|_| f.write_char(*from))
+                .and_then(|_| f.write_char('-'))
+                .and_then(|_| f.write_char(*to))
+                .and_then(|_| f.write_char(']')),
+            Self::Str(StrEdge(s)) => f.write_char('"')
+                .and_then(|_| f.write_str(s))
+                .and_then(|_| f.write_char('"')),
+            Self::Eps(_) => f.write_str("eps"),
+            Self::Unresolved(unresolved) => f.write_fmt(format_args!("Unresolved name: {}", unresolved.0)),
         }
     }
 }
@@ -133,6 +164,8 @@ impl RangeEdge
 
 impl Transition for RangeEdge
 {
+    type OkRes = usize;
+
     fn try_pass<It>(&self, it: &mut It) -> Result<usize, TransitError>
         where It: Iterator<Item = char> + Clone
     {
@@ -160,6 +193,8 @@ impl StrEdge
 
 impl Transition for StrEdge
 {
+    type OkRes = usize;
+
     fn try_pass<It>(&self, it: &mut It) -> Result<usize, TransitError>
         where It: Iterator<Item = char> + Clone
     {
@@ -236,12 +271,32 @@ pub struct EpsEdge;
 
 impl Transition for EpsEdge
 {
+    type OkRes = usize;
+
     fn try_pass<It>(&self, _it: &mut It) -> Result<usize, TransitError>
         where It: Iterator<Item = char> + Clone
     {
         Ok(0)
     }
 
+    fn is_eps(&self) -> bool
+    { true }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnresolvedName(pub String);
+
+impl Transition for UnresolvedName
+{
+    type OkRes = usize;
+
+    fn try_pass<It>(&self, _it: &mut It) -> Result<Self::OkRes, TransitError>
+        where It: Iterator<Item = char> + Clone
+    {
+        panic!("Unresolved name: {}", self.0);
+    }
+
+    // done so, that it will be removed while determinization of NFA
     fn is_eps(&self) -> bool
     { true }
 }

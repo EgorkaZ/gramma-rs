@@ -1,11 +1,14 @@
-use std::{collections::{HashSet, HashMap}, hash::Hash, rc::Rc, ops::{Deref, DerefMut}, ptr::NonNull};
+use std::{collections::{HashSet, HashMap}, hash::Hash, rc::Rc, ops::{Deref, DerefMut}, ptr::NonNull, fmt::Debug};
 
 use kiam::when;
 use static_assertions::assert_eq_size;
 
-use crate::{grammar_parser::lexer::State};
+use crate::{grammar_parser::lexer::State, UnitId};
 
-use super::{StatePtr, Edge, symbol::{Transition, TransitError}, Automata, SubNFA, Symbol, alphabet::Alphabet};
+use super::{StatePtr, Edge, symbol::{Transition, TransitError}, Automata, Symbol, alphabet::Alphabet};
+
+#[derive(Debug)]
+pub struct Conflict(pub UnitId, pub UnitId);
 
 /// Keeps hash_set and hash of the whole set, so it hashes and compares a bit faster
 ///
@@ -15,15 +18,15 @@ struct StateSet
 {
     set: HashSet<StatePtr>,
     hash: usize,
-    is_term: bool,
+    tok_id: Option<UnitId>, // Some(id) means that it's terminal state for token with 'id'
 }
 
 impl StateSet
 {
     fn new() -> Self
-    { StateSet{ set: HashSet::new(), hash: 0, is_term: false } }
+    { StateSet{ set: HashSet::new(), hash: 0, tok_id: None } }
 
-    fn add(&mut self, nfa_state: &StatePtr)
+    fn add(&mut self, nfa_state: &StatePtr) -> Result<(), Conflict>
     {
         if let None = self.set.get(nfa_state) {
             let state_ptr: *const State = Rc::as_ptr(nfa_state);
@@ -31,10 +34,11 @@ impl StateSet
             assert_eq_size!(*const State, usize);
 
             self.hash += state_num;
-            self.is_term |= nfa_state.is_term;
+            self.tok_id = Self::resolve_tok_id(self.tok_id, nfa_state.tok_id)?;
 
             self.set.insert(StatePtr::clone(nfa_state));
         }
+        Ok(())
     }
 
     fn is_empty(&self) -> bool
@@ -42,6 +46,14 @@ impl StateSet
 
     fn size(&self) -> usize
     { self.set.len() }
+
+    fn resolve_tok_id(lhs: Option<UnitId>, rhs: Option<UnitId>) -> Result<Option<UnitId>, Conflict>
+    {
+        match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Err(Conflict(lhs, rhs)),
+            _ => Ok(lhs.or(rhs))
+        }
+    }
 }
 
 impl PartialEq for StateSet
@@ -71,9 +83,9 @@ impl From<StatePtr> for StateSet
     {
         let hash = Rc::as_ptr(&single) as usize;
         let mut set = HashSet::new();
-        let is_term = single.is_term;
+        let tok_id = single.tok_id;
         set.insert(single);
-        StateSet{ set, hash, is_term  }
+        StateSet{ set, hash, tok_id  }
     }
 }
 
@@ -108,11 +120,34 @@ impl DerefMut for DFA
     { &mut self.automata }
 }
 
+impl Debug for DFA
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut visited = HashSet::new();
+        let mut to_visit = vec![StatePtr::clone(&self.start)];
+
+        while let Some(from) = to_visit.pop() {
+            visited.insert(StatePtr::clone(&from));
+            let edges = from.edges.borrow();
+            for Edge{ through, to, .. } in edges.iter() {
+                if visited.insert(StatePtr::clone(to)) {
+                    to_visit.push(StatePtr::clone(to));
+                }
+                f.write_fmt(format_args!("{:p} through {:?} to {:p}\n",
+                    Rc::as_ptr(&from),
+                    through,
+                    Rc::as_ptr(to)))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `from` + all the states accessible through any amount of
 /// eps-transitions
-fn eps_closure(mut set: StateSet, from: &StatePtr) -> StateSet
+fn eps_closure(mut set: StateSet, from: &StatePtr) -> Result<StateSet, Conflict>
 {
-    set.add(from);
+    set.add(from)?;
 
     from.edges.borrow()
         .iter()
@@ -121,11 +156,13 @@ fn eps_closure(mut set: StateSet, from: &StatePtr) -> StateSet
         } else {
             None
         })
-        .fold(set, eps_closure)
+        .fold(Ok(set), |set, curr| {
+            set.and_then(|set| eps_closure(set, curr))
+        })
 }
 
 /// eps-closures of states accessible through `sym` from `from` states
-fn sym_closure(mut set: StateSet, from: &StateSet, sym: &Symbol) -> StateSet
+fn sym_closure(mut set: StateSet, from: &StateSet, sym: &Symbol) -> Result<StateSet, Conflict>
 {
     for state in from.set.iter() {
         set = state.edges.borrow()
@@ -134,22 +171,24 @@ fn sym_closure(mut set: StateSet, from: &StateSet, sym: &Symbol) -> StateSet
                 std::ptr::eq(Rc::as_ptr(&through), sym) => Some(to),
                 _ => None,
             })
-            .fold(set, eps_closure);
+            .fold(Ok(set), |set, curr| {
+                set.and_then(|set| eps_closure(set, curr))
+            })?;
     }
-    set
+    Ok(set)
 }
 
 /// second argument must be sub NFA equal to the automata itself
 /// TODO: manage it by lifetimes, ownership and things
-pub fn thompson(nfa: Automata, SubNFA(entry, _exit): SubNFA) -> DFA
+pub fn thompson(nfa: Automata, entry: StatePtr) -> Result<DFA, Conflict>
 {
     let mut dfa_states: HashMap<Box<StateSet>, StatePtr> = HashMap::new();
 
-    let start = eps_closure(StatePtr::clone(&entry).into(), &entry);
+    let start = eps_closure(StatePtr::clone(&entry).into(), &entry)?;
     let start = Box::new(start);
     let start_ref = NonNull::from(start.deref());
 
-    let start_dfa = State::with_flag(start.is_term).into();
+    let start_dfa = State::with_flag(start.tok_id).into();
     dfa_states.insert(start, StatePtr::clone(&start_dfa));
 
     let mut dfa = DFA::new(StatePtr::clone(&start_dfa), nfa.symbols.clone());
@@ -165,9 +204,9 @@ pub fn thompson(nfa: Automata, SubNFA(entry, _exit): SubNFA) -> DFA
             if sym.is_eps() {
                 continue
             }
-            let new_set = Box::new(sym_closure(StateSet::new(), curr, sym));
+            let new_set = Box::new(sym_closure(StateSet::new(), curr, sym)?);
             let new_set_ref = NonNull::from(new_set.deref());
-            let is_term = new_set.is_term;
+            let tok_id = new_set.tok_id;
             if new_set.set.is_empty() {
                 continue
             }
@@ -176,7 +215,7 @@ pub fn thompson(nfa: Automata, SubNFA(entry, _exit): SubNFA) -> DFA
                 Some(to) => StatePtr::clone(to),
                 None => {
                     let new_state = when! {
-                        is_term => State::terminal(),
+                        let Some(tok_id) = tok_id => State::terminal(tok_id),
                         _ => State::casual(),
                     }.into();
                     dfa_states.insert(new_set, StatePtr::clone(&new_state));
@@ -193,7 +232,7 @@ pub fn thompson(nfa: Automata, SubNFA(entry, _exit): SubNFA) -> DFA
         }
     }
 
-    sort_edges(dfa)
+    Ok(sort_edges(dfa))
 }
 
 fn sort_edges(dfa: DFA) -> DFA
@@ -209,11 +248,14 @@ fn sort_edges(dfa: DFA) -> DFA
 
 impl Transition for DFA
 {
-    fn try_pass<It>(&self, last_accepted: &mut It) -> Result<usize, super::symbol::TransitError>
+    type OkRes = (usize, UnitId);
+
+    fn try_pass<It>(&self, last_accepted: &mut It) -> Result<(usize, UnitId), TransitError>
         where It: Iterator<Item = char> + Clone
     {
         let mut it = last_accepted.clone();
         let mut real_steps = 0;
+        let mut res_id = None;
         let mut lookahead_steps = 0;
 
         let mut curr_state = StatePtr::clone(&self.start);
@@ -227,10 +269,11 @@ impl Transition for DFA
 
             if let Some((curr_steps, to)) = mb_steps {
                 lookahead_steps += curr_steps;
-                if to.is_term {
+                if let Some(tok_id) = to.tok_id {
                     last_accepted.advance_by(lookahead_steps).unwrap();
                     real_steps += lookahead_steps;
                     lookahead_steps = 0;
+                    res_id = Some(tok_id);
                 }
                 curr_state = StatePtr::clone(to)
             } else {
@@ -239,7 +282,7 @@ impl Transition for DFA
         }
 
         if real_steps > 0 {
-            Ok(real_steps)
+            Ok((real_steps, res_id.unwrap()))
         } else {
             Err(TransitError::NoLexemeMatched)
         }
@@ -258,26 +301,27 @@ impl Transition for DFA
 //         loop {
 //             let inner_curr = StatePtr::clone(&curr_state);
 //             let edges = inner_curr.edges.borrow();
-//             let 
+//             let
 //         }
 //     }
 // }
 
-pub struct dfaBASEDlexer<'dfa, 'input>
+pub struct DFABasedLexer<'dfa, 'input>
 {
     dfa: &'dfa DFA,
-    input: &'input str
+    input: &'input str,
+    had_error: bool,
 }
 
-impl<'dfa, 'input> dfaBASEDlexer<'dfa, 'input>
+impl<'dfa, 'input> DFABasedLexer<'dfa, 'input>
 {
     pub fn new(dfa: &'dfa DFA, input: &'input str) -> Self
-    { dfaBASEDlexer{ dfa, input } }
+    { DFABasedLexer{ dfa, input, had_error: false } }
 }
 
-impl<'input> Iterator for dfaBASEDlexer<'_, 'input>
+impl<'input> Iterator for DFABasedLexer<'_, 'input>
 {
-    type Item = Result<&'input str, &'input str>;
+    type Item = Result<(&'input str, UnitId), &'input str>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let spaces_before = self.input.chars()
@@ -292,7 +336,7 @@ impl<'input> Iterator for dfaBASEDlexer<'_, 'input>
 
         let mut moved = self.input.chars();
         match self.dfa.try_pass(&mut moved) {
-            Ok(steps) => {
+            Ok((steps, tok_id)) => {
                 let lexeme_len = self.input.chars()
                     .take(steps)
                     .map(char::len_utf8)
@@ -300,9 +344,15 @@ impl<'input> Iterator for dfaBASEDlexer<'_, 'input>
 
                 let res = &self.input[..lexeme_len];
                 self.input = &self.input[lexeme_len..];
-                Some(Ok(res))
+                Some(Ok((res, tok_id)))
             },
-            Err(_) => Some(Err(self.input)),
+            Err(_) => when! {
+                self.had_error => None,
+                _ => {
+                    self.had_error = true;
+                    Some(Err(self.input))
+                }
+            },
         }
     }
 }
@@ -310,15 +360,16 @@ impl<'input> Iterator for dfaBASEDlexer<'_, 'input>
 #[cfg(test)]
 mod test
 {
-    use crate::{AutomataBuilder, LexerParser, Lexer, grammar_parser::lexer::StrEdge};
+    use crate::{AutomataBuilder, LexerParser, Lexer, grammar_parser::lexer::StrEdge, Registry};
 
     use super::*;
 
     #[test]
-    fn sus_nfa()
+    fn sus_nfa() -> Result<(), Conflict>
     {
         let parser = LexerParser::new();
         let mut nfa = AutomataBuilder::new();
+        let mut reg = Registry::new();
 
         let input = r#"
             lexer
@@ -331,7 +382,7 @@ mod test
             lexer_end
         "#;
 
-        let res = parser.parse(&mut nfa, Lexer::new(input));
+        let res = parser.parse(&mut nfa, &mut reg,Lexer::new(input));
         assert_eq!(nfa.states_cnt(), 16);
         assert!(res.is_ok());
         let a_sym = nfa.nfa.symbols.add_sym(StrEdge::new("a".into()));
@@ -339,32 +390,33 @@ mod test
 
         assert_eq!(nfa.nfa.symbols.symbols().count(), 3);
 
-        let start = res.unwrap().0;
+        let start = res.unwrap();
 
         let mut set_set = HashSet::new();
 
-        let start_closure = eps_closure(StateSet::new(), &start);
+        let start_closure = eps_closure(StateSet::new(), &start)?;
         set_set.insert(&start_closure);
 
         assert_eq!(set_set.len(), 1);
         assert_eq!(start_closure.size(), 6);
 
-        let p_a = sym_closure(StateSet::new(), &start_closure, &a_sym);
+        let p_a = sym_closure(StateSet::new(), &start_closure, &a_sym)?;
         set_set.insert(&p_a);
 
         assert_eq!(set_set.len(), 2);
         assert_eq!(p_a.size(), 7);
 
-        let p_b = sym_closure(StateSet::new(), &start_closure, &b_sym);
+        let p_b = sym_closure(StateSet::new(), &start_closure, &b_sym)?;
         set_set.insert(&p_b);
 
         assert_eq!(set_set.len(), 3);
         assert_eq!(p_b.size(), 6);
 
-        let p_ba = sym_closure(StateSet::new(), &p_b, &a_sym);
+        let p_ba = sym_closure(StateSet::new(), &p_b, &a_sym)?;
         set_set.insert(&p_ba);
 
         assert_eq!(p_ba.size(), 7);
         assert_eq!(set_set.len(), 3);
+        Ok(())
     }
 }

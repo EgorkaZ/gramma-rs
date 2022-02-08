@@ -1,34 +1,34 @@
 use super::{
     tokenizer::{Token::*, *},
     AutomataBuilder, SubNFA, StrEdge, RangeEdge, EpsEdge,
-    StatePtr, State
+    StatePtr, State, Registry, GrammarError,
 };
-use kiam::when;
+use lalrpop_util::ParseError;
 
-grammar<'input>(nfa: &mut AutomataBuilder<'input>);
+grammar<'input>(nfa: &mut AutomataBuilder, reg: &mut Registry);
 
-pub Lexer: SubNFA = {
-    "lexer" <decls:LexDecl*> "lexer_end" => {
+pub Lexer: StatePtr = {
+    "lexer" <decls:LexDecl*> "lexer_end" =>? {
         let start = nfa.add_state(State::casual());
-        let end = nfa.add_state(State::terminal());
 
-        decls.iter()
-            .filter_map(|(is_tok, sub)| when! {
-                *is_tok => Some(sub),
-                _ => None,
-            })
-            .for_each(|sub| {
-                nfa.add_sym(&start, EpsEdge, sub.input());
-                nfa.add_sym(sub.output(), EpsEdge, &end);
-            });
-        SubNFA(start, end)
+        let toks = decls.iter()
+            .filter_map(|(mb_tok_name, sub)| mb_tok_name.map(|name: &'input str| (name, sub)));
+
+        for (name, sub) in toks {
+            nfa.add_sym(&start, EpsEdge, sub.input());
+
+            reg.set_tok(name)
+                .map(|id| nfa.add_state(State::terminal(id)))
+                .map(|term: StatePtr| nfa.add_sym(sub.output(), EpsEdge, &term))
+                .map_err(|err| ParseError::User{ error: GrammarError::Registry(err) })?;
+        }
+        Ok(start)
     }
 }
 
-LexDecl: (bool, SubNFA) = {
+LexDecl: (Option<&'input str>, SubNFA) = {
     <tok:("tok"?)> <id:Id> "=" <curr:LexSeq> ";" => {
-        nfa.assign_to_id(id, SubNFA::clone(&curr));
-        (tok.is_some(), curr)
+        (tok.map(|_| id), nfa.define_name(id, SubNFA::clone(&curr)))
     }
 }
 
@@ -60,7 +60,10 @@ LexAlt: SubNFA = {
 
 LexPrimQual: SubNFA = {
     LexPrim,
-    <curr:LexPrim> "?" => {
+    <sub:LexPrim> "?" => {
+        let curr = nfa.create_sub();
+        nfa.add_sym(curr.input(), EpsEdge, sub.input());
+        nfa.add_sym(sub.output(), EpsEdge, curr.output());
         nfa.add_sym(curr.input(), EpsEdge, curr.output());
         curr
     },
@@ -105,7 +108,7 @@ LexPrim: SubNFA = {
 
 extern {
     type Location = usize;
-    type Error = Error<'input>;
+    type Error = GrammarError<'input>;
 
     enum Token<'input>
     {
