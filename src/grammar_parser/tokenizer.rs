@@ -1,3 +1,5 @@
+use std::{fmt::Display, error};
+
 use combine::{
     self,
     parser::{char::{string, char, letter, spaces, alpha_num}, range::recognize},
@@ -14,10 +16,16 @@ pub struct Error<'input>
     pub unparsed: &'input str,
 }
 
-fn error<T>(unparsed: &str) -> Result<T, GrammarError>
+impl Display for Error<'_>
 {
-    Err(GrammarError::Tokenize(Error { unparsed }))
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    { f.write_fmt(format_args!("Unparsed part:\n{}", self.unparsed)) }
 }
+
+impl error::Error for Error<'_> {}
+
+fn error<T>(unparsed: &str) -> Result<T, Error>
+{ Err(Error{ unparsed }) }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Token<'input>
@@ -42,6 +50,11 @@ pub enum Token<'input>
     GrammarEnd,
     FatArrow(&'input str),
     Colon,
+    Sym,
+    LT,
+    GT,
+    LPar,
+    RPar,
 }
 
 pub struct Lexer<'input>
@@ -58,7 +71,7 @@ impl<'input> Lexer<'input>
 
 pub type Spanned<Tok, Loc, Err> = Result<(Loc, Tok, Loc), Err>;
 
-pub type MbToken<'input> = Spanned<Token<'input>, usize, GrammarError<'input>>;
+pub type MbToken<'input> = Spanned<Token<'input>, usize, Error<'input>>;
 
 impl<'input> Iterator for Lexer<'input>
 {
@@ -74,6 +87,7 @@ impl<'input> Iterator for Lexer<'input>
             Self::p_keyword("lexer_end").map(|_| Token::LexerEnd),
             Self::p_keyword("eps").map(|_| Token::Eps),
             Self::p_keyword("tok").map(|_| Token::Tok),
+            Self::p_keyword("sym").map(|_| Token::Sym),
             Self::p_keyword("grammar").map(|_| Token::GrammarBegin),
             Self::p_keyword("grammar_end").map(|_| Token::GrammarEnd),
 
@@ -90,7 +104,11 @@ impl<'input> Iterator for Lexer<'input>
             char('+').map(|_| Token::Plus),
             char('=').map(|_| Token::Eq),
             char(';').map(|_| Token::Semicolon),
-            char(':').map(|_| Token::Colon)
+            char(':').map(|_| Token::Colon),
+            char('<').map(|_| Token::LT),
+            char('>').map(|_| Token::GT),
+            char('(').map(|_| Token::LPar),
+            char(')').map(|_| Token::RPar)
         )).skip(spaces());
 
         match parser.easy_parse(self.remained) {
@@ -182,6 +200,28 @@ impl Extend<char> for Count
         let iter = iter.into_iter();
         let cnt: usize = iter.map(|ch| ch.len_utf8()).sum();
         self.0 += cnt;
+    }
+}
+
+pub struct RegLexer<'input>
+{
+    lexer: Lexer<'input>,
+}
+
+impl<'input> From<Lexer<'input>> for RegLexer<'input>
+{
+    fn from(lexer: Lexer<'input>) -> Self
+    { RegLexer{ lexer } }
+}
+
+impl<'input> Iterator for RegLexer<'input>
+{
+    type Item = Spanned<Token<'input>, usize, GrammarError<'input>>;
+
+    fn next(&mut self) -> Option<Self::Item>
+    {
+        self.lexer.next()
+            .map(|mb_tok| mb_tok.map_err(GrammarError::Tokenize))
     }
 }
 

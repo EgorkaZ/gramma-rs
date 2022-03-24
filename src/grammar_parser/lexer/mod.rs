@@ -8,7 +8,7 @@ use std::{
     collections::{HashSet, HashMap},
     cell::{RefCell}
 };
-use crate::UnitId;
+use crate::grammar_parser::parser_table::UnitId;
 use self::{alphabet::Alphabet};
 
 pub use self::symbol::{Symbol, RangeEdge, StrEdge, EpsEdge, UnresolvedName, Transition};
@@ -38,6 +38,12 @@ impl State
         let it = from_edges.iter();
         self.edges.borrow_mut().extend(it.cloned());
     }
+
+    pub fn edges(&self) -> &RefCell<Vec<Edge>>
+    { &self.edges }
+
+    pub fn mb_tok_id(&self) -> Option<UnitId>
+    { self.tok_id }
 }
 
 impl Default for State
@@ -53,6 +59,15 @@ pub struct Edge
     from   : Weak<State>,
     through: Rc<Symbol>,
     to     : StatePtr,
+}
+
+impl Edge
+{
+    pub fn through(&self) -> &Symbol
+    { self.through.as_ref() }
+
+    pub fn to(&self) -> &StatePtr
+    { &self.to }
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +145,9 @@ impl Automata
 
     pub fn symbols(&self) -> impl Iterator<Item = &Rc<Symbol>>
     { self.symbols.symbols() }
+
+    pub fn states(&self) -> impl Iterator<Item = &StatePtr>
+    { self.states.iter() }
 }
 
 impl Default for Automata
@@ -312,7 +330,7 @@ impl AutomataBuilder
 #[cfg(test)]
 mod tests
 {
-    use crate::{LexerParser, Lexer, Registry};
+    use crate::{LexerParser, Lexer, RegistryBuilder, tokenizer::RegLexer};
 
     use super::*;
 
@@ -320,9 +338,9 @@ mod tests
     {
         let lexer_parser = LexerParser::new();
         let mut nfa = AutomataBuilder::new();
-        let mut reg = Registry::new();
+        let mut reg = RegistryBuilder::new();
 
-        let dfa = lexer_parser.parse(&mut nfa, &mut reg, Lexer::new(&input))
+        let dfa = lexer_parser.parse(&mut nfa, &mut reg, RegLexer::from(Lexer::new(&input)))
             .map(|start| nfa.build(start))
             .expect("Couldn't parse grammar");
         dfa.unwrap_or_else(|Conflict(f, s)| panic!("Conflicting states: {:?}, {:?}", f, s))

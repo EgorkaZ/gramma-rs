@@ -1,9 +1,9 @@
-use std::{hash::Hash, cmp::Ordering, fmt::{Debug, Write}};
+use std::{hash::Hash, cmp::Ordering, fmt::{Debug, Write, Display}};
 
 use kiam::when;
 
 /// "Metaphorical" symbol: a transition in an automata
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Symbol
 {
     Range(RangeEdge),
@@ -133,7 +133,7 @@ impl Transition for Symbol
     }
 }
 
-impl Debug for Symbol
+impl Display for Symbol
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
     {
@@ -154,7 +154,7 @@ impl Debug for Symbol
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RangeEdge(char, char);
+pub struct RangeEdge(pub char, pub char);
 
 impl RangeEdge
 {
@@ -182,13 +182,23 @@ impl Transition for RangeEdge
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub struct StrEdge(pub String);
 
 impl StrEdge
 {
     pub fn new(s: String) -> StrEdge
     { StrEdge(s) }
+}
+
+impl Debug for StrEdge
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    {
+        f.write_str("StrEdge(String::from(\"")?;
+        f.write_str(&self.0)?;
+        f.write_str("\"))")
+    }
 }
 
 impl Transition for StrEdge

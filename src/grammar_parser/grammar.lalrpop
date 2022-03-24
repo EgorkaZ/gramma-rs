@@ -1,11 +1,80 @@
 use super::{
     tokenizer::{Token::*, *},
     AutomataBuilder, SubNFA, StrEdge, RangeEdge, EpsEdge,
-    StatePtr, State, Registry, GrammarError,
+    StatePtr, State, RegistryBuilder, GrammarError,
+    UnitId
 };
 use lalrpop_util::ParseError;
 
-grammar<'input>(nfa: &mut AutomataBuilder, reg: &mut Registry);
+grammar<'input>(nfa: &mut AutomataBuilder, reg: &mut RegistryBuilder);
+
+pub TotalGrammar: StatePtr = {
+    Grammar <lex_state:Lexer> =>? {
+        reg.assert_units_defined()
+            .map_err(GrammarError::Registry)
+            .map_err(|error| ParseError::User{ error })
+            .map(|_| lex_state)
+    },
+}
+
+pub Grammar: () = {
+    "grammar" <decls:NtDecl*> "grammar_end" => ()
+}
+
+NtDecl: UnitId = {
+    <mb_sym:"sym"?> <id:Id> ":" <res_type:NtType> "{" <mut rules:(<NtRule> ",")*> <last_rule:NtRule> "}" =>? {
+        rules.push(last_rule);
+        reg.set_nterm(id, res_type, rules, mb_sym.is_some())
+            .map_err(GrammarError::Registry)
+            .map_err(|error| ParseError::User{ error })
+    }
+}
+
+NtType: String = {
+    <name:Id> <list:("<" <NtTypeList> ">")?> => {
+        let mut name = String::from(name);
+        if let Some(list) = list {
+            name.push('<');
+            list.into_iter()
+                .intersperse(String::from(", "))
+                .for_each(|sub_type| name.extend(sub_type.chars()));
+            name.push('>');
+        }
+        name
+    },
+    "(" <list:NtTypeList?> ")" => {
+        let mut name = String::new();
+        name.push('(');
+        if let Some(list) = list {
+            let sub_types = list.iter()
+                .map(|sub_type| &sub_type[..])
+                .intersperse(", ")
+                .flat_map(|sub_type| sub_type.chars());
+            name.extend(sub_types);
+        }
+        name.push(')');
+        name
+    },
+}
+
+NtTypeList: Vec<String> = {
+    <mut fst:(<NtType> ",")*> <last:NtType> => {
+        fst.push(last);
+        fst
+    }
+}
+
+NtRule: (Vec<(UnitId, Option<&'input str>)>, &'input str) = {
+    <parts:LabeledId+> <action:Action> => {
+        (parts, action)
+    }
+}
+
+LabeledId: (UnitId, Option<&'input str>) = {
+    <label:(<Id> ":")?> <unit_name:Id> => {
+        (reg.unit_by_name(unit_name), label)
+    }
+}
 
 pub Lexer: StatePtr = {
     "lexer" <decls:LexDecl*> "lexer_end" =>? {
@@ -132,5 +201,10 @@ extern {
         "grammar_end" => GrammarEnd,
         Action        => FatArrow(<&'input str>),
         ":"           => Colon,
+        "sym"         => Sym,
+        "<"           => LT,
+        ">"           => GT,
+        "("           => LPar,
+        ")"           => RPar
     }
 }

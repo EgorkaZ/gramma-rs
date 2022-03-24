@@ -1,11 +1,93 @@
-use mt3::{LexerParser, AutomataBuilder, Lexer, DFALexer, Registry, Conflict};
+use std::{fs::File, io::Write};
+
+use gramma_rs::{parser::ParserBase, codegen::{parser_into_code, generate_actions}};
+use gramma_rs::degenerated::ExprParser;
 
 fn main()
 {
-    let parser = LexerParser::new();
-    let mut nfa = AutomataBuilder::new();
-    let mut reg = Registry::new();
+
     let lexemes = r#"
+    grammar
+        sym Sym
+        { S => {}
+        }
+
+        S
+        { L Eq R => {}
+        , R => {}
+        }
+
+        L
+        { Star R => {}
+        , Id => {}
+        }
+
+        R
+        { L => {}
+        }
+    grammar_end
+    lexer
+        tok Id = { alpha, "_" } { alnum, "_" }*;
+        alpha = { [a-z], [A-Z] };
+        alnum = { alpha, [0-9] };
+
+        tok Star = "*";
+        tok Eq = "=";
+    lexer_end
+    "#;
+
+    let lexemes = r#"
+        grammar
+
+        sym Program : (i32, i64)
+        { Lines => {}
+        }
+
+        Lines : ()
+        { Stmt => {}
+        , Lines Stmt => {}
+        }
+
+        Stmt : HashMap<Lol, Box<Kek>>
+        { Decl => {}
+        , IfStmt => {}
+        , Expr Semicolon => {}
+        }
+
+        Decl : ()
+        { Type Id MbAssign Semicolon => {}
+        }
+
+        MbAssign : ()
+        { Eps => {}
+        , Eq Expr => {}
+        }
+
+        Expr : ()
+        { Id => {}
+        , Int => {}
+        , Number => {}
+        , BoolExpr => {}
+        , LPar Expr RPar => {}
+        , Id LPar ArgComma Expr RPar => {}
+        }
+
+        ArgComma : ()
+        { e:Expr => { vec![e] }
+        , args:ArgComma Comma last:Expr => { args.push(last); args }
+        }
+
+        BoolExpr : ()
+        { Bool => {}
+        , Expr CmpOp Expr => {}
+        }
+
+        IfStmt : ()
+        { If BoolExpr Colon => {}
+        }
+
+        grammar_end
+
         lexer
 
         tok Type = { "int", "bool", "float" };
@@ -23,30 +105,74 @@ fn main()
 
         tok Eq = "=";
         tok Semicolon = ";";
+        tok Colon = ":";
+        tok Comma = ",";
+
+        tok If = "if";
+        tok CmpOp = { "==", "!=", "<=", "=>", "<", ">" };
+
+        tok LPar = "(";
+        tok RPar = ")";
+        tok EOL = "\n";
 
         lexer_end
     "#;
 
-    let res = parser.parse(&mut nfa, &mut reg, Lexer::new(lexemes));
+    let lexemes = r#"
+    grammar
 
-    // println!("hold it: '{}'", &input[241..]);
+        sym Expr : i32
+        { e:SubExpr => { e }
+        }
 
-    let dfa = match res {
-        Ok(res) => nfa.build(res),
-        Err(err) => panic!("Failure((9(\n{:?}", err),
-    }
-    .unwrap_or_else(|Conflict(f, s)| panic!("Conflict: {:?} vs. {:?}", reg.unit(f), reg.unit(s)));
+        SubExpr : i32
+        { lhs:SubExpr Plus  rhs:Term => { lhs + rhs }
+        , lhs:SubExpr Minus rhs:Term => { lhs - rhs }
+        , t:Term => { t }
+        , Minus t:Term => { -t }
+        }
 
-    let input = "
-        int lol = 42;
-        float kek = 42.24;
+        Term : i32
+        { lhs:Term Star rhs:Fact => { lhs * rhs }
+        , lhs:Term Div  rhs:Fact => { lhs / rhs }
+        , f:Fact => { f }
+        }
 
-        bool fuck_my_life = True;
-    ";
+        Fact : i32
+        { LPar e:SubExpr RPar => { e }
+        , n:Num => { n.parse().unwrap() }
+        }
 
-    DFALexer::new(&dfa, &input)
-        .for_each(|mb_lexeme| match mb_lexeme {
-            Ok((as_str, tok_id)) => println!("'{:?}': '{}'", reg.unit(tok_id), as_str),
-            Err(err) => println!("error {}", err)
-        });
+    grammar_end
+    lexer
+
+        tok Num = [1-9] [0-9]*;
+
+        tok Plus = "+";
+        tok Star = "*";
+        tok Minus = "-";
+        tok Div = "/";
+
+
+        tok LPar = "(";
+        tok RPar = ")";
+
+    lexer_end
+    "#;
+
+    let base = ParserBase::new(lexemes);
+
+    let input = "- 1 - (2 + 4)";
+
+    let parser = ExprParser::new();
+    let res = parser.parse(input)
+        .unwrap_or_else(|err| panic!("No parse: {err}"));
+    println!("Oh, my god, I've parsed {res}");
+
+
+    // let mut file = File::create("src/degenerated.rs").expect("Couldn't create");
+    // parser_into_code(&base).into_iter()
+    //     .chain(generate_actions(&base))
+    //     .try_for_each(|line| writeln!(file, "{line}"))
+    //     .expect("Couldn't write line");
 }

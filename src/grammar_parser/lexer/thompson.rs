@@ -1,9 +1,10 @@
+#![allow(dead_code)]
 use std::{collections::{HashSet, HashMap}, hash::Hash, rc::Rc, ops::{Deref, DerefMut}, ptr::NonNull, fmt::Debug};
 
 use kiam::when;
 use static_assertions::assert_eq_size;
 
-use crate::{grammar_parser::lexer::State, UnitId};
+use crate::{grammar_parser::{lexer::State, parser_table::UnitId}, AutomataBuilder};
 
 use super::{StatePtr, Edge, symbol::{Transition, TransitError}, Automata, Symbol, alphabet::Alphabet};
 
@@ -103,6 +104,32 @@ impl DFA
         automata.symbols = symbols;
         automata.add_state(&start);
         DFA{ automata, start }
+    }
+
+    pub fn start(&self) -> &StatePtr
+    { &self.start }
+
+    pub fn from_vecs(
+        states: Vec<(Option<UnitId>, Vec<(usize, usize)>)>,
+        start_state: usize,
+        symbols: Vec<Symbol>,
+    ) -> Self
+    {
+        let mut builder = AutomataBuilder::new();
+        let state_ptrs: Vec<_> = states.iter()
+            .map(|(mb_tok, _)| match mb_tok {
+                Some(tok_id) => builder.add_state(State::terminal(*tok_id)),
+                None => builder.add_casual(),
+            })
+            .collect();
+        states.iter()
+            .enumerate()
+            .flat_map(|(from, (_, edges))| edges.iter()
+                .map(move |(through, to)| (from, through, to))
+            )
+            .map(|(from, through, to)| (&state_ptrs[from], &symbols[*through], &state_ptrs[*to]))
+            .for_each(|(from, through, to)| builder.add_sym(from, through.clone(), to));
+        DFA{ automata: builder.nfa, start: state_ptrs[start_state].clone() }
     }
 }
 
@@ -311,12 +338,13 @@ pub struct DFABasedLexer<'dfa, 'input>
     dfa: &'dfa DFA,
     input: &'input str,
     had_error: bool,
+    ended: bool
 }
 
 impl<'dfa, 'input> DFABasedLexer<'dfa, 'input>
 {
     pub fn new(dfa: &'dfa DFA, input: &'input str) -> Self
-    { DFABasedLexer{ dfa, input, had_error: false } }
+    { DFABasedLexer{ dfa, input, had_error: false, ended: false } }
 }
 
 impl<'input> Iterator for DFABasedLexer<'_, 'input>
@@ -331,7 +359,13 @@ impl<'input> Iterator for DFABasedLexer<'_, 'input>
         self.input = &self.input[spaces_before..];
 
         if self.input.is_empty() {
-            return None
+            return when! {
+                self.ended => None,
+                _ => {
+                    self.ended = true;
+                    Some(Ok(("EOI", UnitId(1))))
+                }
+            };
         }
 
         let mut moved = self.input.chars();
@@ -360,7 +394,7 @@ impl<'input> Iterator for DFABasedLexer<'_, 'input>
 #[cfg(test)]
 mod test
 {
-    use crate::{AutomataBuilder, LexerParser, Lexer, grammar_parser::lexer::StrEdge, Registry};
+    use crate::{AutomataBuilder, LexerParser, Lexer, grammar_parser::lexer::StrEdge, RegistryBuilder, tokenizer::RegLexer};
 
     use super::*;
 
@@ -369,7 +403,7 @@ mod test
     {
         let parser = LexerParser::new();
         let mut nfa = AutomataBuilder::new();
-        let mut reg = Registry::new();
+        let mut reg = RegistryBuilder::new();
 
         let input = r#"
             lexer
@@ -382,7 +416,7 @@ mod test
             lexer_end
         "#;
 
-        let res = parser.parse(&mut nfa, &mut reg,Lexer::new(input));
+        let res = parser.parse(&mut nfa, &mut reg,RegLexer::from(Lexer::new(input)));
         assert_eq!(nfa.states_cnt(), 16);
         assert!(res.is_ok());
         let a_sym = nfa.nfa.symbols.add_sym(StrEdge::new("a".into()));

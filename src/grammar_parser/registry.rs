@@ -1,81 +1,89 @@
-use std::borrow::{Borrow};
-use std::collections::HashMap;
-use std::mem::size_of;
-use std::ops::{Deref, IndexMut};
-use std::fmt::Debug;
+use std::{
+    ops::{Deref, DerefMut},
+    fmt::{Debug, Display}, ptr::{self, NonNull},
+    borrow::{Borrow, BorrowMut},
+    collections::{HashMap, HashSet},
+    hash::Hash, error::Error, mem::MaybeUninit,
+};
 
-use kiam::when;
+use super::parser_table::{GrUnit, Rule, UnitId, RuleId, build_first, ItemSet, ItemId, create_items, KernelId, ItemDFA, FirstEntry, init_lookaheads};
 
-pub enum GrUnit
+pub trait IdToIdentified
 {
-    NTerm { rules: Vec<RuleId> },
-    Tok { is_eps: bool },
+    type Identified;
+
+    fn search<'reg>(self, registry: &'reg RegistryBuilder) -> Option<&'reg Self::Identified>;
 }
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct UnitId(usize);
-
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct RuleId(usize);
-
-impl Deref for UnitId
+pub trait IdToIdentifiedMut: IdToIdentified
 {
-    type Target = usize;
-
-    fn deref(&self) -> &Self::Target
-    { &self.0 }
+    fn search_mut<'reg>(self, registry: &'reg mut RegistryBuilder) -> Option<&'reg mut Self::Identified>;
 }
 
-impl Deref for RuleId
+#[derive(Clone, Copy)]
+pub struct RegEntry<Id, RegRef>
+    where Id: IdToIdentified,
+      RegRef: Borrow<RegistryBuilder>,
 {
-    type Target = usize;
-
-    fn deref(&self) -> &Self::Target
-    { &self.0 }
+    info_id: Id,
+    owner: RegRef,
 }
 
-struct Rule
+impl<Id, RegRef> RegEntry<Id, RegRef>
+    where RegRef: Borrow<RegistryBuilder>,
+              Id: IdToIdentified + Copy,
 {
-    from: UnitId,
-    to: Vec<UnitId>,
+    pub fn id(&self) -> Id
+    { self.info_id }
 }
 
-pub struct InterRule
+impl<Id, RegRef> PartialEq for RegEntry<Id, RegRef>
+    where Id: IdToIdentified + PartialEq,
+      RegRef: Borrow<RegistryBuilder>,
 {
-    id: RuleId,
-    pos: usize,
+    fn eq(&self, other: &Self) -> bool
+    {
+        assert!(ptr::eq(self.owner.borrow(), other.owner.borrow()));
+        self.info_id == other.info_id
+    }
 }
 
-pub struct RegEntry<'reg, T>
+impl<Id, RegRef> Eq for RegEntry<Id, RegRef>
+    where Id: IdToIdentified + Eq,
+      RegRef: Borrow<RegistryBuilder>,
+{}
+
+impl<Id, RegRef> Hash for RegEntry<Id, RegRef>
+    where Id: IdToIdentified + Hash,
+      RegRef: Borrow<RegistryBuilder>,
 {
-    info: &'reg T,
-    owner: &'reg Registry,
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H)
+    { self.info_id.hash(state); }
 }
 
-impl<T> Deref for RegEntry<'_, T>
-{
-    type Target = T;
+pub type UnitEntry<'a> = RegEntry<UnitId, &'a RegistryBuilder>;
+pub type UnitEntryMut<'a> = RegEntry<UnitId, &'a mut RegistryBuilder>;
+pub type RuleEntry<'a> = RegEntry<RuleId, &'a RegistryBuilder>;
+pub type RuleEntryMut<'a> = RegEntry<RuleId, &'a mut RegistryBuilder>;
+pub type KernEntry<'a> = RegEntry<KernelId, &'a RegistryBuilder>;
 
-    fn deref(&self) -> &Self::Target
-    { self.info.borrow() }
-}
-
-type UnitEntry<'a> = RegEntry<'a, GrUnit>;
-type RuleEntry<'a> = RegEntry<'a, Rule>;
-
-pub struct Registry
+pub struct RegistryBuilder
 {
     named_units: HashMap<String, UnitId>,
     units: Vec<Option<GrUnit>>,
     rules: Vec<Rule>,
+    kerns: Vec<ItemSet<ItemId>>,
+    goto: Vec<HashMap<UnitId, KernelId>>,
+    lookaheads: HashMap<(KernelId, ItemId), HashSet<UnitId>>,
+    initial_kern: Option<KernelId>,
 }
 
-impl Registry
+impl RegistryBuilder
 {
     pub fn new() -> Self
     { Self::default() }
 
-    pub fn get_by_name(&mut self, name: &str) -> UnitId
+    pub fn unit_by_name(&mut self, name: &str) -> UnitId
     {
         match self.named_units.get(name) {
             Some(found) => *found,
@@ -88,23 +96,76 @@ impl Registry
         }
     }
 
-    pub fn set_tok(&mut self, name: &str) -> Result<UnitId, RegError>
+    pub fn name_by_unit(&self, id: UnitId) -> &str
     {
-        let id = self.get_by_name(name);
-        let unit = self.get_mut_unit(id);
-        if unit.is_some() {
-            return Err(RegError::AcquiredId(id))
-        }
-        *unit = Some(GrUnit::Tok{ is_eps: false });
-        Ok(id)
+        self.named_units
+            .iter()
+            .find(|(_, curr_id)| **curr_id == id)
+            .map(|(name, _)| &name[..])
+            .unwrap_or("UNNAMED_UNIT")
     }
 
-    pub fn get_unit(&self, id: UnitId) -> Option<UnitEntry<'_>>
+    pub fn names_to_units(&self) -> impl Iterator<Item = (&String, &UnitId)>
+    { self.named_units.iter() }
+
+// setters
+    pub fn set_tok(&mut self, name: &str) -> Result<UnitId, RegError>
     {
-        self.units[*id]
-            .as_ref()
-            .map(|unit| self.as_entry(unit))
+        let id = self.unit_by_name(name);
+        println!("setting 'tok' to '{name}' ({id:?})");
+
+        match &mut self.units[*id] {
+            Some(_) => Err(RegError::redefined_id(id, self)),
+            unit_entry@None => {
+                *unit_entry = Some(GrUnit::Tok{ id, is_eps: false });
+                Ok(id)
+            }
+        }
     }
+
+    pub fn set_nterm(&mut self, name: &str, res_type: String, rules: Vec<(Vec<(UnitId, Option<&str>)>, &str)>, is_sym: bool) -> Result<UnitId, RegError>
+    {
+        let id = self.unit_by_name(name);
+        let rules_cnt = self.rules.len();
+        match &mut self.units[*id] {
+            Some(_) => Err(RegError::redefined_id(id, self)),
+            unit_entry@None => {
+                let rules = rules.into_iter()
+                    .map(|(rule, action)| rule.into_iter()
+                        .fold((vec![], vec![], action), |(mut ids, mut names, _), (part_id, name)| {
+                            ids.push(part_id);
+                            names.push(name.map(String::from));
+                            (ids, names, action)
+                        }))
+                    .map(|(ids, names, action)| Rule::new(id, ids, names, action.into()));
+                let rule_ids = (0..rules.len())
+                        .map(|id| id + rules_cnt)
+                        .map(RuleId)
+                        .collect();
+                *unit_entry = Some(GrUnit::NTerm{ id, rules: rule_ids, res_type, is_sym });
+                self.rules.extend(rules);
+                Ok(id)
+            }
+        }
+    }
+
+    pub fn assert_units_defined(&self) -> Result<(), RegError>
+    {
+        let undefined = self.units
+            .iter()
+            .position(|unit| unit.is_none())
+            .map(UnitId)
+            .map(|id| RegError::undefined_id(id, self));
+
+        match undefined {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+// unit getters
+    pub fn get_unit(&self, id: UnitId) -> Option<UnitEntry<'_>>
+    { self.as_entry(id) }
 
     /// NB! will panic if unit isn't initialized
     pub fn unit(&self, id: UnitId) -> UnitEntry<'_>
@@ -113,101 +174,407 @@ impl Registry
             .expect(&format!("Unit {} was not initialized", *id))
     }
 
+    pub fn eps_tok(&self) -> UnitEntry<'_>
+    { self.unit(UnitId(0)) }
 
-    fn get_mut_unit(&mut self, id: UnitId) -> &mut Option<GrUnit>
+    pub fn eoi_tok(&self) -> UnitEntry<'_>
+    { self.unit(UnitId(1)) }
+
+    fn get_unit_mut(&mut self, id: UnitId) -> Option<UnitEntryMut<'_>>
+    { self.as_entry_mut(id) }
+
+    pub fn units(&self) -> impl Iterator<Item = UnitEntry<'_>>
     {
-        self.units.index_mut(*id)
+        self.units.iter()
+            .map(|unit| UnitEntry{ info_id: unit.as_ref().unwrap().id(), owner: self })
     }
 
-    fn as_entry<'reg, T>(&'reg self, info: &'reg T) -> RegEntry<'reg, T>
-    { RegEntry{ info: info, owner: &self } }
+    pub fn pseudo_unit(&self) -> UnitId
+    {
+        let unit_id = self.named_units.get(":PseudoToken:")
+            .expect("Pseudo token is not initialized");
+        *unit_id
+    }
 
+// rule getters
+    pub fn get_rule(&self, id: RuleId) -> Option<RuleEntry<'_>>
+    { self.as_entry(id) }
+
+    pub fn get_rule_mut(&mut self, id: RuleId) -> Option<RuleEntryMut<'_>>
+    { self.as_entry_mut(id) }
+
+    fn as_entry_mut<Id>(&mut self, id: Id) -> Option<RegEntry<Id, &mut Self>>
+        where Id: IdToIdentifiedMut + Copy,
+    {
+        match id.search_mut(self) {
+            Some(_) => Some(RegEntry{ info_id: id, owner: self }),
+            None => None,
+        }
+    }
+
+    pub fn rules(&self) -> impl Iterator<Item = RuleEntry<'_>> + Clone
+    {
+        self.rules.iter()
+            .enumerate()
+            .map(|(id, _rule)| RuleEntry{ info_id: RuleId(id), owner: self })
+    }
+
+// items
+    pub fn next_item(&self, item: ItemId, next_unit: UnitId) -> Option<ItemId>
+    {
+        let rule = self.get_rule(item.rule_id()).unwrap();
+        let to = rule.to();
+
+        when! {
+            item.pos() >= to.len() => None,
+            to[item.pos()] == next_unit => item.next_item(),
+            _ => None
+        }
+    }
+
+    pub fn item_unit(&self, item: ItemId) -> UnitEntry<'_>
+    {
+        let rule = self.get_rule(item.rule_id()).unwrap();
+        let to_id = rule.to()[item.pos()];
+        self.unit(to_id)
+    }
+
+    pub fn rule_to_item(&self, rule_id: RuleId) -> ItemId
+    {
+        let rule = self.get_rule(rule_id).unwrap();
+        let to = rule.to();
+        match &to {
+            [to] => Some(*to), // if production has single item on right side
+            _ => None,
+        }
+        .map(|to| self.unit(to))
+        .filter(|to| to.is_eps())
+        .map(|to| ItemId::begin(rule.id(), 0))
+        .unwrap_or_else(|| { // otherwise, turn into 'A -> * ...'
+            ItemId::begin(rule.id(), to.len())
+        })
+    }
+
+    pub fn init_kernels(&mut self, items: ItemDFA)
+    {
+        let mapping: HashMap<_, _> = items.keys()
+            .enumerate()
+            .map(|(idx, set)| (set.as_ref(), KernelId(idx)))
+            .collect();
+
+        let mut kern_dfa: HashMap<KernelId, HashMap<UnitId, KernelId>> = items.iter()
+            .map(|(set, gotos)| {
+                let set = mapping.get(set.as_ref()).unwrap();
+                let gotos = gotos.iter()
+                    .map(|(unit, to)| {
+                        let to = unsafe { to.as_ref() };
+                        (*unit, *mapping.get(&to).unwrap())
+                    })
+                    .collect();
+                (*set, gotos)
+            })
+            .collect();
+        self.goto = (0..kern_dfa.len())
+            .map(KernelId)
+            .map(|from| kern_dfa.remove(&from).unwrap())
+            .collect();
+
+        let mut kerns = Vec::with_capacity(mapping.len());
+        for _ in 0..mapping.len() {
+            kerns.push(MaybeUninit::<ItemSet<ItemId>>::uninit());
+        }
+        for (set, _) in items.iter() {
+            let idx = mapping.get(set.as_ref()).unwrap();
+            kerns[**idx].write(set.deref().clone());
+        }
+        self.kerns = kerns.into_iter()
+            .map(|val| unsafe { val.assume_init() })
+            .collect();
+        self.initial_kern = self.kerns.iter()
+            .enumerate()
+            .flat_map(|(id, items)| items.iter()
+                .map(move |item| (item, KernelId(id)))
+            )
+            .find(|(item, _)| item.pos() == 0)
+            .map(|(_, kern_id)| kern_id);
+    }
+
+    pub fn init_lalr_items(&mut self) -> Result<(), RegError>
+    {
+        let items_dfa = create_items(self);
+        self.init_kernels(items_dfa);
+
+        let _pseudo_tok = self.set_tok(":PseudoToken:");
+        let nterm_first = build_first(self)?;
+        for (unit_id, entry) in nterm_first.iter() {
+            let unit_name = self.name_by_unit(*unit_id);
+            print!("{unit_name}:");
+
+            for tok in entry.firsts() {
+                let tok_name = self.name_by_unit(tok.id());
+                print!(" {tok_name},")
+            }
+            println!("")
+        }
+
+        self.lookaheads = init_lookaheads(self, &nterm_first);
+        // print LR(1) items
+        println!("Items (kernels)");
+        for kernel in self.kernels() {
+            println!("----------------------{:?}", kernel.id());
+            for item in kernel.iter() {
+                let rule_id = item.rule_id();
+                let rule = self.get_rule(rule_id).unwrap();
+
+                let from = rule.from();
+                let from_str = self.name_by_unit(from.id());
+                print!("{from_str} -> ");
+                for (idx, curr_to_id) in rule.to().iter().enumerate() {
+                    if item.pos() == idx {
+                        print!("(*) ");
+                    }
+                    let curr_to_str = self.name_by_unit(*curr_to_id);
+                    print!("{curr_to_str} ");
+                }
+                if item.pos() == rule.to().len() {
+                    print!("(*) ");
+                }
+
+                if let Some(curr_lkhds) = self.lookaheads.get(&(kernel.id(), *item)) {
+                    print!("[");
+                    let mut iter = curr_lkhds.iter();
+                    if let Some(fst) = iter.next() {
+                        let fst_str = self.name_by_unit(*fst);
+                        print!("{fst_str}");
+                    }
+                    iter.map(|curr| self.name_by_unit(*curr)).for_each(|curr| print!(", {curr}"));
+                    print!("]");
+                }
+                println!("")
+            }
+        }
+        Ok(())
+    }
+
+    pub fn kernel(&self, kern_id: KernelId) -> KernEntry
+    { self.as_entry(kern_id)
+        .expect("Kernel {kern_id} was not initialized") }
+
+    pub fn kernels(&self) -> impl Iterator<Item = KernEntry>
+    {
+        self.kerns.iter()
+            .enumerate()
+            .map(|(id, _)| KernEntry{ info_id: KernelId(id), owner: self })
+    }
+
+    pub fn goto(&self, kern_id: KernelId, unit: UnitId) -> Option<KernEntry>
+    {
+        let kern_goto = &self.goto[*kern_id];
+        kern_goto.get(&unit)
+            .map(|res_id| self.kernel(*res_id))
+    }
+
+    pub fn lookaheads(&self, kern_id: KernelId, item_id: ItemId) -> &HashSet<UnitId>
+    { &self.lookaheads.get(&(kern_id, item_id)).unwrap() }
+
+    pub fn initial_kern(&self) -> KernelId
+    { self.initial_kern.unwrap() }
+
+// help for previous
+    fn as_entry<Id>(&self, id: Id) -> Option<RegEntry<Id, &Self>>
+        where Id: IdToIdentified + Copy,
+    {
+        id.search(self)
+            .map(|_| RegEntry{ info_id: id, owner: self })
+    }
 }
 
-impl Default for Registry
+impl RegistryBuilder
+{
+    pub fn from_vecs(
+        named_units: Vec<(String, UnitId)>,
+        tokens: Vec<(UnitId, bool)>,
+        nterms: Vec<(UnitId, Vec<RuleId>, String, bool)>,
+        rules: Vec<(UnitId, Vec<UnitId>, Vec<Option<String>>, String)>
+    ) -> Self
+    {
+        let named_units = named_units.into_iter().collect();
+        let mut units: Vec<Option<GrUnit>> = (0..(tokens.len() + nterms.len()))
+            .map(|_| None)
+            .collect();
+        for (token_id, is_eps) in tokens {
+            units[*token_id] = Some(GrUnit::Tok{ id: token_id, is_eps });
+        }
+        for (nterm_id, rules, res_type, is_sym) in nterms {
+            units[*nterm_id] = Some(GrUnit::NTerm{ id: nterm_id, rules, res_type, is_sym })
+        }
+        assert!(units.iter().all(|unit| unit.is_some()));
+
+        let rules = rules.into_iter()
+            .map(|(from, to, names, action)| Rule::new(from, to, names, action))
+            .collect();
+        let mut res = RegistryBuilder{
+            named_units,
+            units,
+            rules,
+            ..Default::default()
+        };
+        res.init_lalr_items()
+            .map(|()| res)
+            .unwrap_or_else(|err| panic!("Couldn't construct LALR items: {err}") )
+    }
+}
+
+impl Default for RegistryBuilder
 {
     fn default() -> Self
     {
-        let mut reg = Registry{ named_units: HashMap::default(), units: vec![], rules: vec![] };
-        reg.set_tok("eps").unwrap();
+        let mut reg = RegistryBuilder{
+            named_units: HashMap::default(),
+            units: vec![],
+            rules: vec![],
+            kerns: vec![],
+            goto: vec![],
+            lookaheads: HashMap::default(),
+            initial_kern: None,
+        };
+        let eps_id = reg.set_tok("Eps").unwrap();
+        let mut eps = reg.get_unit_mut(eps_id).unwrap();
+        *eps = GrUnit::Tok{ id: eps_id, is_eps: true };
 
-        match reg.get_mut_unit(UnitId(0)) {
-            eps@None => { *eps = Some(GrUnit::Tok{ is_eps: true }) },
-            _ => (),
-        }
+        let _eoi_id = reg.set_tok("EOI").unwrap();
+
         reg
     }
 }
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub enum RegError
+impl IdToIdentified for RuleId
 {
-    AcquiredId(UnitId),
+    type Identified = Rule;
+
+    fn search<'reg>(self, registry: &'reg RegistryBuilder) -> Option<&'reg Self::Identified>
+    { registry.rules.get(*self) }
 }
 
+impl IdToIdentifiedMut for RuleId
+{
+    fn search_mut<'reg>(self, registry: &'reg mut RegistryBuilder) -> Option<&'reg mut Self::Identified>
+    { registry.rules.get_mut(*self) }
+}
 
-impl<T> Debug for RegEntry<'_, T>
-    where T: IdSearchible
+impl IdToIdentified for UnitId
+{
+    type Identified = GrUnit;
+
+    fn search<'reg>(self, registry: &'reg RegistryBuilder) -> Option<&'reg Self::Identified>
+    { registry.units[*self].as_ref() }
+}
+
+impl IdToIdentifiedMut for UnitId
+{
+    fn search_mut<'reg>(self, registry: &'reg mut RegistryBuilder) -> Option<&'reg mut Self::Identified>
+    { registry.units[*self].as_mut() }
+}
+
+impl IdToIdentified for KernelId
+{
+    type Identified = ItemSet<ItemId>;
+
+    fn search<'reg>(self, registry: &'reg RegistryBuilder) -> Option<&'reg Self::Identified>
+    { registry.kerns.get(*self) }
+}
+
+impl<RegRef> RegEntry<RuleId, RegRef>
+    where RegRef: Borrow<RegistryBuilder>,
+{
+    pub fn from(&self) -> UnitEntry<'_>
+    { self.owner.borrow().unit(self.from_id()) }
+
+    pub fn owner(&self) -> &RegistryBuilder
+    { self.owner.borrow() }
+}
+
+impl<Id, RegRef> Deref for RegEntry<Id, RegRef>
+    where Id: IdToIdentified + Copy + Debug,
+      RegRef: Borrow<RegistryBuilder>,
+{
+    type Target = Id::Identified;
+
+    fn deref(&self) -> &Self::Target
+    {
+        self.info_id.clone().search(self.owner.borrow())
+            .unwrap_or_else(|| panic!("Deref on RegEntry with invalid id: {:?}", self.info_id))
+    }
+}
+
+impl<Id, RegRef> DerefMut for RegEntry<Id, RegRef>
+    where Id: IdToIdentifiedMut + Copy + Debug,
+      RegRef: BorrowMut<RegistryBuilder>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target
+    {
+        self.info_id.clone().search_mut(self.owner.borrow_mut())
+            .unwrap_or_else(|| panic!("DerefMut on RegEntry with invalid id: {:?}", self.info_id))
+    }
+}
+
+impl<RegRef> Debug for RegEntry<UnitId, RegRef>
+    where RegRef: Borrow<RegistryBuilder>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    { f.write_str(self.owner.borrow().name_by_unit(self.info_id)) }
+}
+
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+pub enum RegErrorKind
+{
+    RedefinedId(UnitId),
+    UndefinedId(UnitId),
+}
+
+pub struct RegError
+{
+    kind: RegErrorKind,
+    reg: NonNull<RegistryBuilder>,
+}
+
+impl RegError
+{
+    pub fn redefined_id(id: UnitId, reg: &RegistryBuilder) -> Self
+    { RegError{ kind: RegErrorKind::RedefinedId(id), reg: NonNull::from(reg) } }
+
+    pub fn undefined_id(id: UnitId, reg: &RegistryBuilder) -> Self
+    { RegError{ kind: RegErrorKind::UndefinedId(id), reg: NonNull::from(reg) } }
+}
+
+impl Debug for RegError
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
     {
-        let tok_name = self.restore_id(&self.owner)
-            .map(UnitId)
-            .and_then(|id| self.owner.named_units.iter()
-                .find_map(|(name, curr_id)| if id == *curr_id {
-                    Some(&name[..])
-                } else {
-                    None
-                }))
-            .unwrap_or("UNRECOGNIZED_TOKEN");
-
-        f.write_str(tok_name)
+        Debug::fmt(&self.kind, f)
     }
 }
 
-trait IdSearchible
+impl PartialEq for RegError
 {
-    fn restore_id<'reg>(&'reg self, reg: &'reg Registry) -> Option<usize>;
+    fn eq(&self, other: &Self) -> bool
+    { self.kind == other.kind }
+}
 
-    fn count_dist<T>(base: usize, offseted: usize, max_len: usize) -> Option<usize>
+impl Eq for RegError {}
+
+impl Display for RegError
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
     {
-        if base > offseted {
-            return None
-        }
+        use RegErrorKind::*;
 
-        let dist = offseted - base;
-        let idx = dist / size_of::<T>();
-        when! {
-            idx > max_len => None,
-            _ => Some(idx),
+        let reg = unsafe { self.reg.as_ref() };
+        match self.kind {
+            UndefinedId(id) => f.write_fmt(format_args!("Undefined id: {id:?} '{}'", reg.name_by_unit(id))),
+            RedefinedId(id) => f.write_fmt(format_args!("Redefined id: {id:?} '{}'", reg.name_by_unit(id))),
         }
     }
 }
 
-impl IdSearchible for Option<GrUnit>
-{
-    fn restore_id<'reg>(&'reg self, reg: &'reg Registry) -> Option<usize>
-    {
-        let data_begin: *const Option<GrUnit> = reg.units.as_ptr();
-        let info_ptr: *const Option<GrUnit> = self;
-
-        Self::count_dist::<Option<GrUnit>>(
-            data_begin as usize,
-            info_ptr as usize,
-            reg.units.len())
-    }
-}
-
-impl IdSearchible for GrUnit
-{
-    fn restore_id<'reg>(&'reg self, reg: &'reg Registry) -> Option<usize>
-    {
-        let data_begin: *const Option<GrUnit> = reg.units.as_ptr();
-        let info_ptr: *const GrUnit = self;
-
-        Self::count_dist::<Option<GrUnit>>(
-            data_begin as usize,
-            info_ptr as usize,
-            reg.units.len())
-    }
-}
+impl Error for RegError {}
