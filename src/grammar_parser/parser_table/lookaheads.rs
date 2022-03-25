@@ -27,7 +27,6 @@ impl Borrow<ItemId> for LAItemId
 
 pub fn init_lookaheads<'reg>(reg: &'reg RegistryBuilder, nterm_firsts: &HashMap<UnitId, FirstEntry<'reg>>) -> HashMap<(KernelId, ItemId), HashSet<UnitId>>
 {
-    let pseudo_unit = reg.pseudo_unit();
     let mut lookaheads = HashMap::<(KernelId, ItemId), HashSet<UnitId>>::new();
     let mut propagation = HashMap::<(KernelId, ItemId), HashSet<KernelId>>::new();
 
@@ -95,9 +94,6 @@ fn propagate_lookaheads<'reg>(
     let kern = reg.kernel(kern_id);
 
     for item_id in kern.iter() {
-        print!("Closure (");
-        print_item(reg, *item_id);
-        println!(")");
         let closed = closure(reg, nterm_firsts, &ItemSet::from(LAItemId{ item: *item_id, lookahead: pseudo_unit }));
         closed.iter()
             .filter(|la_item| !la_item.is_final())
@@ -114,33 +110,13 @@ fn propagate_lookaheads<'reg>(
                         .insert(la_item.lookahead);
                 }
             });
-
-        println!("Propagate from");
-        print_item(reg, *item_id);
-        println!("\nTo:");
-        propagation.get(&(kern_id, *item_id))
-            .into_iter()
-            .flat_map(|to_kerns| to_kerns.iter())
-            .for_each(|to_kern| reg.kernel(*to_kern).iter()
-                .for_each(|to_item| { print_item(reg, *to_item); println!("") })
-            )
+        // propagation.get(&(kern_id, *item_id))
+        //     .into_iter()
+        //     .flat_map(|to_kerns| to_kerns.iter())
+        //     .for_each(|to_kern| reg.kernel(*to_kern).iter()
+        //         .for_each(|to_item| { print_item(reg, *to_item); println!("") })
+        //     )
     }
-    // println!("Aggregated:");
-    // for (item, lkhds) in res.iter() {
-    //     print!("\t");
-    //     print_item(reg, *item);
-    //     print!("[");
-    //     let mut lkhds_it = lkhds.iter()
-    //         .map(|lkhd| reg.name_by_unit(*lkhd));
-    //     if let Some(fst) = lkhds_it.next() {
-    //         print!("{fst}");
-    //     }
-    //     for lkhd in lkhds_it {
-    //         print!(", {lkhd}");
-    //     }
-    //     println!("]");
-    // }
-    // println!("Done");
 }
 
 fn closure(
@@ -197,14 +173,6 @@ fn closure(
     res
 }
 
-fn goto(reg: &RegistryBuilder, items: &ItemSet<LAItemId>, unit: UnitId) -> ItemSet<LAItemId>
-{
-    items.iter()
-        .filter_map(|la_item| reg.next_item(la_item.item, unit)
-            .map(|item| LAItemId{ item, lookahead: la_item.lookahead }))
-        .collect()
-}
-
 fn print_item(reg: &RegistryBuilder, item_id: ItemId)
 {
     let rule_id = item_id.rule_id();
@@ -225,6 +193,7 @@ fn print_item(reg: &RegistryBuilder, item_id: ItemId)
     }
 }
 
+#[allow(dead_code)]
 fn print_item_lkhd(reg: &RegistryBuilder, lookaheads: &HashMap<ItemId, HashSet<UnitId>>, item_id: ItemId)
 {
     print_item(reg, item_id);

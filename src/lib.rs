@@ -17,5 +17,3 @@ extern crate kiam;
 pub mod parser;
 
 pub mod codegen;
-
-pub mod degenerated;

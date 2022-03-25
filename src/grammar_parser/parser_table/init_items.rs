@@ -65,7 +65,6 @@ pub fn create_items<'reg>(reg: &'reg RegistryBuilder) -> ItemDFA
         sets = next_sets;
     }
 
-    print(reg, &mapping);
     mapping
 }
 
@@ -113,56 +112,56 @@ fn goto(reg: &RegistryBuilder, curr_set: &ItemSet<ItemId>, unit: UnitId) -> Item
         .collect()
 }
 
-fn print(reg: &RegistryBuilder, mapping: &ItemDFA)
-{
-    let set_idx: HashMap<_, _> = mapping.iter()
-        .map(|(key, _)| key)
-        .map(|set| -> *const ItemSet<_> { set.as_ref() })
-        .enumerate()
-        .map(|(idx, ptr)| (ptr as usize, idx))
-        .collect();
+// fn print(reg: &RegistryBuilder, mapping: &ItemDFA)
+// {
+//     let set_idx: HashMap<_, _> = mapping.iter()
+//         .map(|(key, _)| key)
+//         .map(|set| -> *const ItemSet<_> { set.as_ref() })
+//         .enumerate()
+//         .map(|(idx, ptr)| (ptr as usize, idx))
+//         .collect();
 
-    for (set_ptr, idx) in set_idx.iter() {
-        println!("{idx}:");
+//     for (set_ptr, idx) in set_idx.iter() {
+//         println!("{idx}:");
 
-        let set_ptr = (*set_ptr) as *const ItemSet<_>;
-        let set = unsafe { set_ptr.as_ref() }.unwrap();
-        print_item_set(reg, set);
-        let gotos = mapping.get(set).unwrap();
-        for (unit_id, to_set) in gotos.iter() {
-            let unit_str = reg.name_by_unit(*unit_id);
-            let to_set_ptr: *const ItemSet<_> = unsafe { to_set.as_ref() };
-            let to_set_idx = set_idx.get(&(to_set_ptr as usize)).unwrap();
-            println!("`-{unit_str}-> {to_set_idx}");
-        }
-        println!("");
-    }
-}
+//         let set_ptr = (*set_ptr) as *const ItemSet<_>;
+//         let set = unsafe { set_ptr.as_ref() }.unwrap();
+//         print_item_set(reg, set);
+//         let gotos = mapping.get(set).unwrap();
+//         for (unit_id, to_set) in gotos.iter() {
+//             let unit_str = reg.name_by_unit(*unit_id);
+//             let to_set_ptr: *const ItemSet<_> = unsafe { to_set.as_ref() };
+//             let to_set_idx = set_idx.get(&(to_set_ptr as usize)).unwrap();
+//             println!("`-{unit_str}-> {to_set_idx}");
+//         }
+//         println!("");
+//     }
+// }
 
-fn print_item_set(reg: &RegistryBuilder, set: &ItemSet<ItemId>)
-{
-    let print_item = |item: &ItemId| {
-        let rule = reg.get_rule(item.rule_id()).unwrap();
-        let from_str = reg.name_by_unit(rule.from_id());
-        print!("{from_str} -> ");
-        for (idx, unit_id) in rule.to().iter().copied().enumerate() {
-            if idx == item.pos() {
-                print!("(*) ");
-            }
-            let unit_str = reg.name_by_unit(unit_id);
-            print!("{unit_str} ");
-        }
-        if item.pos() == rule.to().len() {
-            print!("(*) ");
-        }
-        println!("");
-    };
-    set.iter().for_each(print_item);
+// fn print_item_set(reg: &RegistryBuilder, set: &ItemSet<ItemId>)
+// {
+//     let print_item = |item: &ItemId| {
+//         let rule = reg.get_rule(item.rule_id()).unwrap();
+//         let from_str = reg.name_by_unit(rule.from_id());
+//         print!("{from_str} -> ");
+//         for (idx, unit_id) in rule.to().iter().copied().enumerate() {
+//             if idx == item.pos() {
+//                 print!("(*) ");
+//             }
+//             let unit_str = reg.name_by_unit(unit_id);
+//             print!("{unit_str} ");
+//         }
+//         if item.pos() == rule.to().len() {
+//             print!("(*) ");
+//         }
+//         println!("");
+//     };
+//     set.iter().for_each(print_item);
 
-    println!("-------------------------");
-    let closed = closure(reg, set.clone());
-    closed.iter()
-        .filter(|item| !set.contains(**item))
-        .for_each(print_item);
-    println!("=========================");
-}
+//     println!("-------------------------");
+//     let closed = closure(reg, set.clone());
+//     closed.iter()
+//         .filter(|item| !set.contains(**item))
+//         .for_each(print_item);
+//     println!("=========================");
+// }

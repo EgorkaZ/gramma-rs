@@ -228,53 +228,6 @@ impl Transition for StrEdge
     }
 }
 
-// #[derive(Debug, Eq)]
-// pub struct ChoiceEdge(Vec<Rc<Symbol>>);
-
-// impl ChoiceEdge
-// {
-//     pub fn new(choice: Vec<Rc<Symbol>>) -> Self
-//     { ChoiceEdge(choice) }
-// }
-
-// impl Transition for ChoiceEdge
-// {
-//     fn try_pass<It>(&self, it: &mut It) -> Result<usize, TransitError>
-//         where It: Iterator<Item = char> + Clone
-//     {
-//         let mut last_err = TransitError::EmptyChoice;
-//         for alt in self.0.iter() {
-//             match alt.try_pass(it) {
-//                 Ok(steps) => return Ok(steps),
-//                 Err(err) => last_err = err,
-//             }
-//         }
-//         Err(last_err)
-//     }
-// }
-
-// impl PartialEq for ChoiceEdge
-// {
-//     fn eq(&self, other: &Self) -> bool {
-//         let ChoiceEdge(lhs) = self;
-//         let ChoiceEdge(rhs) = other;
-
-//         lhs.iter()
-//             .zip(rhs)
-//             .all(|(l, r)| Rc::ptr_eq(l, r))
-//     }
-// }
-
-// impl Hash for ChoiceEdge
-// {
-//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-//         let ChoiceEdge(vec) = self;
-//         for sym in vec.iter() {
-//             ptr::hash(Rc::as_ptr(sym), state)
-//         }
-//     }
-// }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EpsEdge;
@@ -293,8 +246,14 @@ impl Transition for EpsEdge
     { true }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct UnresolvedName(pub String);
+
+impl Debug for UnresolvedName
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+    { f.write_fmt(format_args!("UnresolvedName(String::from(\"{}\"))", self.0)) }
+}
 
 impl Transition for UnresolvedName
 {

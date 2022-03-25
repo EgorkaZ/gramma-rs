@@ -52,15 +52,20 @@ fn action_callback(base: &ParserBase) -> String
             (rule, format!("_{from_name}_{rule_idx}"), from_name)
         })
         .map(|(rule, func_name, from_name)| {
-            let mut line = format!("            {} => match (", *rule.id());
+            let mut line = format!("            {:?} => match ", rule.id());
+            let mb_push_paren = |line: &mut String, paren: char| if rule.to().len() != 1 { line.push(paren); };
             let checked_args = (0..rule.to().len())
                 .map(|_| format!("args.next().unwrap()"))
                 .intersperse(",".into());
+
+            mb_push_paren(&mut line, '(');
             line.extend(checked_args);
-            line.extend(") {\n".chars());
+            mb_push_paren(&mut line, ')');
+
+            line.extend(" {\n".chars());
 
             line.extend(iter::repeat(' ').take(16));
-            line.push('(');
+            mb_push_paren(&mut line, '(');
             let matched_args = rule.to().iter()
                 .map(|to_id| base.registry().unit(*to_id))
                 .enumerate()
@@ -70,7 +75,7 @@ fn action_callback(base: &ParserBase) -> String
                 })
                 .intersperse(",".into());
             line.extend(matched_args);
-            line.push(')');
+            mb_push_paren(&mut line, ')');
 
             line.extend(format!(" => Self::_{from_name}({func_name}(").chars());
             let func_args = (0..rule.to().len())
@@ -92,12 +97,10 @@ fn action_callback(base: &ParserBase) -> String
     format!(r#"
 impl ActionCallback for _Data
 {{
-    fn run_action(args: Vec<Self>, rule_id: RuleId, base: &ParserBase) -> Self
+    fn run_action(args: Vec<Self>, rule_id: RuleId) -> Self
     {{
         let mut args = args.into_iter();
-        let rule = base.registry().get_rule(rule_id).unwrap();
-        let arg_cnt = rule.to().len();
-        match *rule_id {{
+        match rule_id {{
 {rule_matchings}
         }}
     }}
@@ -171,7 +174,8 @@ fn generate_action(base: &ParserBase, rule_id: RuleId, idx: usize, res_type: &st
                 GrUnit::NTerm{ res_type, .. } => &res_type,
                 GrUnit::Tok{ .. } => "String",
             };
-            format!("    {arg_name}: {arg_type},")
+            let unit_name = reg.name_by_unit(to_unit.id());
+            format!("    {arg_name}: {arg_type}, // {unit_name}")
         });
     lines.extend(arg_lines);
     lines.push(format!(") -> {res_type}"));

@@ -1,12 +1,12 @@
-use std::{collections::HashMap, ops::Deref, iter};
+use std::{collections::HashMap, ops::Deref};
 
 use crate::{DFA, RegistryBuilder, parser::ParserBase, GrUnit, UnitId};
 
 pub fn parser_into_code(base: &ParserBase) -> Vec<String>
 {
     let mut lines = vec![];
-    lines.push("use crate::{*, lexer::{Symbol::*, *}};".into());
-    lines.push("use crate::parser::{ParserBase, ParseError, ActionCallback, ParsedData};".into());
+    lines.push("use gramma_rs::{*, lexer::{Symbol::*, *}};".into());
+    lines.push("use gramma_rs::parser::{ParserBase, ParseError, ActionCallback, ParsedData};".into());
 
     lines.push("fn create_parser_base() -> ParserBase".into());
     lines.push("{".into());
@@ -69,7 +69,7 @@ fn dfa_into_code(dfa: &DFA) -> Vec<String>
             let line = format!("        ({mb_tok:?}, vec![");
             let line = edges.iter()
                 .map(|(sym, to_state)| format!("({sym}, {to_state}),"))
-                .fold(line, |mut line, curr| line + &curr);
+                .fold(line, |line, curr| line + &curr);
             line + "]),"
         });
     lines.extend(states_lines);
@@ -162,7 +162,7 @@ impl {sym_name}Parser
     {{ {sym_name}Parser{{ base: create_parser_base() }} }}
 
     pub fn parse<'this, 'input>(&'this self, to_parse: &'input str) -> Result<{res_type}, ParseError<'this>>
-    {{ self.base.create::<'this, 'input, _Data, {res_type}>(to_parse).parse() }}
+    {{ self.base.create::<_Data, {res_type}>(to_parse).parse() }}
 }}
 "#)
 }

@@ -6,7 +6,7 @@ use std::{
     hash::Hash, error::Error, mem::MaybeUninit,
 };
 
-use super::parser_table::{GrUnit, Rule, UnitId, RuleId, build_first, ItemSet, ItemId, create_items, KernelId, ItemDFA, FirstEntry, init_lookaheads};
+use super::parser_table::{GrUnit, Rule, UnitId, RuleId, build_first, ItemSet, ItemId, create_items, KernelId, ItemDFA, init_lookaheads};
 
 pub trait IdToIdentified
 {
@@ -112,7 +112,7 @@ impl RegistryBuilder
     pub fn set_tok(&mut self, name: &str) -> Result<UnitId, RegError>
     {
         let id = self.unit_by_name(name);
-        println!("setting 'tok' to '{name}' ({id:?})");
+        // println!("setting 'tok' to '{name}' ({id:?})");
 
         match &mut self.units[*id] {
             Some(_) => Err(RegError::redefined_id(id, self)),
@@ -249,7 +249,7 @@ impl RegistryBuilder
         }
         .map(|to| self.unit(to))
         .filter(|to| to.is_eps())
-        .map(|to| ItemId::begin(rule.id(), 0))
+        .map(|_to| ItemId::begin(rule.id(), 0))
         .unwrap_or_else(|| { // otherwise, turn into 'A -> * ...'
             ItemId::begin(rule.id(), to.len())
         })
@@ -306,19 +306,23 @@ impl RegistryBuilder
 
         let _pseudo_tok = self.set_tok(":PseudoToken:");
         let nterm_first = build_first(self)?;
-        for (unit_id, entry) in nterm_first.iter() {
-            let unit_name = self.name_by_unit(*unit_id);
-            print!("{unit_name}:");
+        // for (unit_id, entry) in nterm_first.iter() {
+        //     let unit_name = self.name_by_unit(*unit_id);
+        //     print!("{unit_name}:");
 
-            for tok in entry.firsts() {
-                let tok_name = self.name_by_unit(tok.id());
-                print!(" {tok_name},")
-            }
-            println!("")
-        }
+        //     for tok in entry.firsts() {
+        //         let tok_name = self.name_by_unit(tok.id());
+        //         print!(" {tok_name},")
+        //     }
+        //     println!("")
+        // }
 
         self.lookaheads = init_lookaheads(self, &nterm_first);
-        // print LR(1) items
+        Ok(())
+    }
+
+    pub fn print_lalr_item(&self)
+    {
         println!("Items (kernels)");
         for kernel in self.kernels() {
             println!("----------------------{:?}", kernel.id());
@@ -353,7 +357,6 @@ impl RegistryBuilder
                 println!("")
             }
         }
-        Ok(())
     }
 
     pub fn kernel(&self, kern_id: KernelId) -> KernEntry

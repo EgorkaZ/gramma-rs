@@ -61,7 +61,7 @@ pub fn build_first<'reg>(reg: &'reg RegistryBuilder) -> Result<HashMap<UnitId, F
             let upd_first = first(reg, &nterm_firsts, to_ids.iter());
             let curr_first = nterm_firsts
                 .entry(from_id)
-                .or_insert_with(|| {had_changes = true; println!("Inserting {}", reg.name_by_unit(from_id)); FirstEntry::default()});
+                .or_insert_with(|| {had_changes = true; /*println!("Inserting {}", reg.name_by_unit(from_id));*/ FirstEntry::default()});
 
             had_changes |= curr_first.extend(upd_first);
         }

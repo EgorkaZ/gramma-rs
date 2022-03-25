@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::{Display, Write}, marker::PhantomData};
 use crate::{
     RegistryBuilder, DFA, AutomataBuilder, GrammarParser,
     tokenizer::RegLexer, Conflict, Lexer, RuleId,
-    KernelId, UnitId, ItemId, DFALexer, codegen
+    KernelId, UnitId, DFALexer
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,7 +30,7 @@ impl std::fmt::Debug for ParserBase
 
 impl ParserBase
 {
-    pub fn new(grammar: &str) -> Self
+    pub fn from_grammar(grammar: &str) -> Self
     {
         let mut reg = RegistryBuilder::new();
         let dfa = {
@@ -209,14 +209,14 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                             break when! {
                                 <Data as ParsedData<ParseRes>>::sym_id() == rule.from_id() => {
                                     self.state_push(state, data);
-                                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id, self.base));
+                                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id));
                                     Done(<Data as ParsedData<ParseRes>>::extract_data(self.data_pop()))
                                 },
                                 _ => self.parse_error(ErrKind::ReduceFail(top_id, rule.from_id()))
                             }
                         },
                     };
-                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id, self.base));
+                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id));
                     self.state_push(new_state, data);
                     // println!("Token {}, Reduce: {}", reg.name_by_unit(token_id), self.state_top());
                 },
@@ -263,7 +263,7 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
 
 pub trait ActionCallback: Sized
 {
-    fn run_action(args: Vec<Self>, rule: RuleId, base: &ParserBase) -> Self;
+    fn run_action(args: Vec<Self>, rule: RuleId) -> Self;
 
     fn wrap_token(token_str: String) -> Self;
 }
