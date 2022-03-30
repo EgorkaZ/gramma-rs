@@ -11,7 +11,7 @@ pub enum Action
 {
     Shift(KernelId),
     Reduce(RuleId),
-    Accept,
+    Accept(RuleId),
 }
 pub struct ParserBase
 {
@@ -83,6 +83,29 @@ impl ParserBase
 
     pub fn actions(&self) -> &Vec<HashMap<UnitId, Action>>
     { &self.actions }
+
+    pub fn set_sym<T, Res>(mut self) -> Self
+        where T: ParsedData<Res>
+    {
+        let sym = <T as ParsedData<Res>>::sym_id();
+        let eoi_id = self.reg.eoi_tok().id();
+        self.reg.kernels()
+            .for_each(|kern| kern.iter()
+                .filter(|item| self.reg.lookaheads(kern.id(), **item).contains(&eoi_id))
+                .filter(|item| item.is_final())
+                .map(|item| item.rule_id())
+                .map(|rule| self.reg.get_rule(rule).unwrap())
+                .filter(|rule| rule.from_id() == sym)
+                .for_each(|rule| {
+                    println!("{:?} will accept by rule {}", kern.id(), DisplayRule(rule.id(), &self.reg));
+                    self.actions[*kern.id()].insert(eoi_id, Action::Accept(rule.id()));
+                })
+            );
+
+        // println!("{sym_kern_id:?} will accept by rule {}", DisplayRule(sym_rule.id(), self.registry()));
+        // self.actions[*sym_kern_id].insert(eoi_id, Action::Accept(sym_rule.id()));
+        self
+    }
 }
 
 fn init_actions(reg: &RegistryBuilder) -> Vec<HashMap<UnitId, Action>>
@@ -103,12 +126,26 @@ fn init_actions(reg: &RegistryBuilder) -> Vec<HashMap<UnitId, Action>>
                     .map(move |lkhd| (item.rule_id(), lkhd))
                 )
                 .for_each(|(rule, lkhd)| {
-                    if let Some(Action::Reduce(prev)) = kern_actions.insert(*lkhd, Action::Reduce(rule)) {
-                        panic!(
-                            "Reduce-reduce conflict on lookahead {}:\n{}\nvs.\n{}",
-                            reg.name_by_unit(*lkhd),
-                            DisplayRule(rule, reg), DisplayRule(prev, reg)
-                        )
+                    let kern_id = kern.id();
+                    match kern_actions.insert(*lkhd, Action::Reduce(rule)) {
+                        Some(Action::Reduce(prev)) => {
+                            reg.print_lalr_items();
+                            panic!(
+                                "Reduce-reduce conflict on {kern_id:?} [{}]:\n{}\nvs.\n{}",
+                                reg.name_by_unit(*lkhd),
+                                DisplayRule(rule, reg), DisplayRule(prev, reg)
+                            )
+                        },
+                        Some(Action::Shift(to_kern)) => {
+                            reg.print_lalr_items();
+                            panic!(
+                                "Shift-reduce conflict on {kern_id:?} [{}]: Shift({to_kern:?}) vs. Reduce({})",
+                                reg.name_by_unit(*lkhd),
+                                DisplayRule(rule, reg)
+                            )
+                        },
+                        Some(Action::Accept(_)) => panic!("HOW"),
+                        None => (),
                     }
                 });
 
@@ -181,10 +218,13 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                 }
             }
         };
+        let token_name = reg.name_by_unit(token_id);
 
         loop {
             let top = self.state_top();
             let state = top.state;
+
+            print!("State: {state:?}, Token: {token_name}, ");
 
             match self.base.action(state, token_id) {
                 Some(Action::Shift(new_state)) => {
@@ -192,14 +232,12 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                     let data = Node::Token { name: String::from(tok_name), matched: String::from(matched) };
                     self.state_push(new_state, data);
                     self.data_push(<Data as ActionCallback>::wrap_token(matched.into()));
-                    // println!("Token: {tok_name}, Shift: {}", self.state_top());
+                    println!("Shift, to: {new_state:?}");
                     break Continue(self)
                 },
                 Some(Action::Reduce(rule_id)) => {
+                    let (action_res, new_node) = self.reduce_by_rule(rule_id);
                     let rule = reg.get_rule(rule_id).unwrap();
-                    let children = self.states_to_reduce(rule.to().len());
-                    let action_args = self.data_to_reduce(rule.to().len());
-                    let data = Node::ParsedNTerm { rule: rule.id(), children };
 
                     let new_top = self.state_top();
                     let top_id = new_top.state;
@@ -208,26 +246,43 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                         None => {
                             break when! {
                                 <Data as ParsedData<ParseRes>>::sym_id() == rule.from_id() => {
-                                    self.state_push(state, data);
-                                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id));
-                                    Done(<Data as ParsedData<ParseRes>>::extract_data(self.data_pop()))
+                                    panic!("How did I get here?")
+                                    // self.push(state, new_node, action_res);
+                                    // Done(<Data as ParsedData<ParseRes>>::extract_data(self.data_pop()))
                                 },
                                 _ => self.parse_error(ErrKind::ReduceFail(top_id, rule.from_id()))
                             }
                         },
                     };
-                    self.data_push(<Data as ActionCallback>::run_action(action_args, rule_id));
-                    self.state_push(new_state, data);
-                    // println!("Token {}, Reduce: {}", reg.name_by_unit(token_id), self.state_top());
+                    self.push(new_state, new_node, action_res);
+                    println!("Reduce, rule: {}, to: {new_state:?}", DisplayRule(rule_id, reg));
                 },
-                Some(Action::Accept) => {
-                    break Done(<Data as ParsedData<ParseRes>>::extract_data(self.data_pop()))
+                Some(Action::Accept(rule_id)) => {
+                    println!("Accept({})", DisplayRule(rule_id, reg));
+                    let (data, _node) = self.reduce_by_rule(rule_id);
+
+                    // at this moment we should have empty data stack and only Hanging value in state stack
+                    if self.state_stack.len() > 1 {
+                        break self.parse_error(ErrKind::UnexpectedAccept(rule_id))
+                    }
+                    break Done(<Data as ParsedData<ParseRes>>::extract_data(data))
                 }
                 None => {
+                    println!("I have no plan for this");
                     break self.parse_error(ErrKind::UnexpectedToken(token_id))
                 }
             }
         }
+    }
+
+    fn reduce_by_rule(&mut self, rule_id: RuleId) -> (Data, Node)
+    {
+        let rule = self.base.registry().get_rule(rule_id).unwrap();
+        let children = self.states_to_reduce(rule.to().len());
+        let action_args = self.data_to_reduce(rule.to().len());
+        let data = <Data as ActionCallback>::run_action(action_args, rule_id);
+        let node = Node::ParsedNTerm { rule: rule_id, children };
+        (data, node)
     }
 
     fn state_top(&mut self) -> &ASTNode<'base>
@@ -235,6 +290,12 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
 
     fn data_pop(&mut self) -> Data
     { self.data.pop().unwrap() }
+
+    fn push(&mut self, kern_id: KernelId, node: Node, data: Data)
+    {
+        self.state_push(kern_id, node);
+        self.data_push(data);
+    }
 
     fn state_push(&mut self, new_state: KernelId, data: Node)
     { self.state_stack.push(ASTNode{ base: self.base, state: new_state, data }) }
@@ -289,6 +350,7 @@ enum ErrKind
     UnexpectedEOI,
     UnexpectedToken(UnitId),
     ReduceFail(KernelId, UnitId),
+    UnexpectedAccept(RuleId),
     TokenizeErr(String),
 }
 
@@ -311,6 +373,9 @@ impl<'base> Display for ParseError<'base>
             }
             TokenizeErr(unparsed) => {
                 f.write_fmt(format_args!("TokenizeErr. Unparsed part: {unparsed}"))
+            }
+            UnexpectedAccept(rule_id) => {
+                f.write_fmt(format_args!("UnexpectedAccept. Rule was {{{}}}", DisplayRule(*rule_id, self.base.registry())))
             }
         }?;
         f.write_str("\nstack:")?;
@@ -341,7 +406,7 @@ fn print_node(f: &mut std::fmt::Formatter<'_>, node: &Node, base: &ParserBase, i
         Node::Token { name, matched } => f.write_fmt(format_args!("tok {name}{{{matched}}}")),
         Node::ParsedNTerm { rule, children } => {
             f.write_fmt(format_args!("NTerm{{{}}}", DisplayRule(*rule, &base.reg)))?;
-            indent.push(' ');
+            indent.push('-');
             children.iter()
                 .try_for_each(|child| f.write_char('\n')
                     .and_then(|()| print_node(f, child, base, indent))

@@ -48,20 +48,20 @@ fn process_some_file(path: &Path) -> Result<(), Box<dyn Error>>
         .append(false)
         .open(code_path)?;
 
-    eprintln!("Writing copied part");
-    eprintln!("{copied}");
+    // eprintln!("Writing copied part");
+    // eprintln!("{copied}");
     writeln!(code_file, "{copied}")?;
 
-    eprintln!("Writing initial code part");
+    // eprintln!("Writing initial code part");
 
     parser_into_code(&parser).into_iter()
-        .inspect(|line| eprintln!("{line}"))
+        // .inspect(|line| eprintln!("{line}"))
         .try_for_each(|line| writeln!(code_file, "{line}"))?;
 
-    eprintln!("Writing actions part");
+    // eprintln!("Writing actions part");
     generate_actions(&parser).into_iter()
-        .inspect(|line| eprintln!("{line}"))
+        // .inspect(|line| eprintln!("{line}"))
         .try_for_each(|line| writeln!(code_file, "{line}"))?;
-    eprintln!("Written actions part");
+    // eprintln!("Written actions part");
     Ok(())
 }

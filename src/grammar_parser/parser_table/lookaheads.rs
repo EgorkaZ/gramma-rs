@@ -28,7 +28,7 @@ impl Borrow<ItemId> for LAItemId
 pub fn init_lookaheads<'reg>(reg: &'reg RegistryBuilder, nterm_firsts: &HashMap<UnitId, FirstEntry<'reg>>) -> HashMap<(KernelId, ItemId), HashSet<UnitId>>
 {
     let mut lookaheads = HashMap::<(KernelId, ItemId), HashSet<UnitId>>::new();
-    let mut propagation = HashMap::<(KernelId, ItemId), HashSet<KernelId>>::new();
+    let mut propagation = HashMap::<(KernelId, ItemId), HashSet<(KernelId, ItemId)>>::new();
 
     for kern in reg.kernels() {
         for item in kern.iter() {
@@ -59,15 +59,13 @@ pub fn init_lookaheads<'reg>(reg: &'reg RegistryBuilder, nterm_firsts: &HashMap<
                 Some(lkhds) => lkhds.into_iter().copied().collect(),
                 None => continue,
             };
-            for item in reg.kernel(to).iter() {
-                let to_lkhds = lookaheads.get_mut(&(to, *item)).unwrap();
+            let to_lkhds = lookaheads.get_mut(&to).unwrap();
 
-                let old_len = to_lkhds.len();
-                to_lkhds.extend(from_lkhds.iter().copied());
-                let new_len = to_lkhds.len();
+            let old_len = to_lkhds.len();
+            to_lkhds.extend(from_lkhds.iter().copied());
+            let new_len = to_lkhds.len();
 
-                changed |= old_len != new_len;
-            }
+            changed |= old_len != new_len;
         }
     }
     // let kernel_items: HashSet<ItemId> = reg.kernels()
@@ -85,7 +83,7 @@ fn propagate_lookaheads<'reg>(
     nterm_firsts: &HashMap<UnitId, FirstEntry<'reg>>,
     kern_id: KernelId,
     lookaheads: &mut HashMap<(KernelId, ItemId), HashSet<UnitId>>,
-    propagation: &mut HashMap<(KernelId, ItemId), HashSet<KernelId>>)
+    propagation: &mut HashMap<(KernelId, ItemId), HashSet<(KernelId, ItemId)>>)
 {
     // print!("closure(");
     // print_item(reg, item_id);
@@ -100,12 +98,13 @@ fn propagate_lookaheads<'reg>(
             .map(|la_item| (la_item, reg.item_unit(la_item.item).id()))
             .map(|(la_item, curr_unit)| (la_item, reg.goto(kern_id, curr_unit).unwrap()))
             .for_each(|(la_item, to_kern)| {
+                let next_item = la_item.next_item().unwrap();
                 if la_item.lookahead == pseudo_unit {
                     propagation.entry((kern_id, *item_id))
                         .or_insert_with(Default::default)
-                        .insert(to_kern.id());
+                        .insert((to_kern.id(), next_item));
                 } else {
-                    lookaheads.entry((to_kern.id(), la_item.item.next_item().unwrap()))
+                    lookaheads.entry((to_kern.id(), next_item))
                         .or_insert_with(Default::default)
                         .insert(la_item.lookahead);
                 }

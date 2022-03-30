@@ -321,7 +321,7 @@ impl RegistryBuilder
         Ok(())
     }
 
-    pub fn print_lalr_item(&self)
+    pub fn print_lalr_items(&self)
     {
         println!("Items (kernels)");
         for kernel in self.kernels() {
@@ -355,6 +355,12 @@ impl RegistryBuilder
                     print!("]");
                 }
                 println!("")
+            }
+
+            let gotos = &self.goto[*kernel.id()];
+            for (tok_id, to_kern) in gotos {
+                let tok_str = self.name_by_unit(*tok_id);
+                println!("  ---({tok_str})---> {to_kern:?}");
             }
         }
     }

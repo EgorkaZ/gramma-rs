@@ -159,10 +159,13 @@ pub struct {sym_name}Parser
 impl {sym_name}Parser
 {{
     pub fn new() -> Self
-    {{ {sym_name}Parser{{ base: create_parser_base() }} }}
+    {{ {sym_name}Parser{{ base: create_parser_base().set_sym::<_Data, {res_type}>() }} }}
 
     pub fn parse<'this, 'input>(&'this self, to_parse: &'input str) -> Result<{res_type}, ParseError<'this>>
     {{ self.base.create::<_Data, {res_type}>(to_parse).parse() }}
+
+    pub fn dump_info(&self)
+    {{ self.base.registry().print_lalr_items() }}
 }}
 "#)
 }
