@@ -40,7 +40,9 @@ fn process_some_file(path: &Path) -> Result<(), Box<dyn Error>>
     let parser = ParserBase::from_grammar(&grammar[real_start..]);
 
     let code_path = path.with_extension("rs");
-    fs::remove_file(&code_path)?;
+    if code_path.exists() {
+        fs::remove_file(&code_path)?;
+    }
 
     let mut code_file = File::options()
         .create(true)
