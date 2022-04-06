@@ -224,7 +224,7 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
             let top = self.state_top();
             let state = top.state;
 
-            print!("State: {state:?}, Token: {token_name}, ");
+            // print!("State: {state:?}, Token: {token_name}, ");
 
             match self.base.action(state, token_id) {
                 Some(Action::Shift(new_state)) => {
@@ -232,7 +232,7 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                     let data = Node::Token { name: String::from(tok_name), matched: String::from(matched) };
                     self.state_push(new_state, data);
                     self.data_push(<Data as ActionCallback>::wrap_token(matched.into()));
-                    println!("Shift, to: {new_state:?}");
+                    // println!("Shift, to: {new_state:?}");
                     break Continue(self)
                 },
                 Some(Action::Reduce(rule_id)) => {
@@ -255,10 +255,10 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                         },
                     };
                     self.push(new_state, new_node, action_res);
-                    println!("Reduce, rule: {}, to: {new_state:?}", DisplayRule(rule_id, reg));
+                    // println!("Reduce, rule: {}, to: {new_state:?}", DisplayRule(rule_id, reg));
                 },
                 Some(Action::Accept(rule_id)) => {
-                    println!("Accept({})", DisplayRule(rule_id, reg));
+                    // println!("Accept({})", DisplayRule(rule_id, reg));
                     let (data, _node) = self.reduce_by_rule(rule_id);
 
                     // at this moment we should have empty data stack and only Hanging value in state stack
@@ -267,10 +267,7 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
                     }
                     break Done(<Data as ParsedData<ParseRes>>::extract_data(data))
                 }
-                None => {
-                    println!("I have no plan for this");
-                    break self.parse_error(ErrKind::UnexpectedToken(token_id))
-                }
+                None => break self.parse_error(ErrKind::UnexpectedToken(token_id)),
             }
         }
     }
@@ -278,8 +275,14 @@ impl<'base, 'input, Data, ParseRes> Parser<'base, 'input, Data, ParseRes>
     fn reduce_by_rule(&mut self, rule_id: RuleId) -> (Data, Node)
     {
         let rule = self.base.registry().get_rule(rule_id).unwrap();
+
+        if rule.is_eps_rule() {
+            // push eps to data stack, as it will be taken now
+            self.data_push(Data::wrap_token(String::new()));
+        }
         let children = self.states_to_reduce(rule.to().len());
         let action_args = self.data_to_reduce(rule.to().len());
+
         let data = <Data as ActionCallback>::run_action(action_args, rule_id);
         let node = Node::ParsedNTerm { rule: rule_id, children };
         (data, node)

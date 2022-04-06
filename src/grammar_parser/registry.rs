@@ -243,16 +243,13 @@ impl RegistryBuilder
     {
         let rule = self.get_rule(rule_id).unwrap();
         let to = rule.to();
-        match &to {
-            [to] => Some(*to), // if production has single item on right side
-            _ => None,
-        }
-        .map(|to| self.unit(to))
-        .filter(|to| to.is_eps())
-        .map(|_to| ItemId::begin(rule.id(), 0))
-        .unwrap_or_else(|| { // otherwise, turn into 'A -> * ...'
-            ItemId::begin(rule.id(), to.len())
-        })
+
+        let item_len = if rule.is_eps_rule() {
+            0
+        } else {
+            to.len()
+        };
+        ItemId::begin(rule_id, item_len)
     }
 
     pub fn init_kernels(&mut self, items: ItemDFA)
@@ -501,6 +498,17 @@ impl<RegRef> RegEntry<RuleId, RegRef>
 
     pub fn owner(&self) -> &RegistryBuilder
     { self.owner.borrow() }
+
+    pub fn is_eps_rule(&self) -> bool
+    {
+        let reg = self.owner();
+        match self.to() {
+            [to] => Some(reg.unit(*to)), // len == 1
+            _ => None
+        }
+        .filter(|to| to.is_eps()) // and it is Eps
+        .is_some()
+    }
 }
 
 impl<Id, RegRef> Deref for RegEntry<Id, RegRef>

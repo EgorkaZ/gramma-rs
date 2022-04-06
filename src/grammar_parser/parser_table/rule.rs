@@ -80,6 +80,9 @@ impl ItemId
 
     pub fn is_final(&self) -> bool
     { self.pos >= self.len }
+
+    pub fn has_eps_rule(&self) -> bool
+    { self.pos == 0 && self.len == 0 }
 }
 
 #[derive(Clone)]
